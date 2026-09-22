@@ -1,12 +1,14 @@
 # AgentMonitor
 
-Desktop monitor that starts a Grok or Cursor agent, watches the process, and forwards IRC `FROM` lines into that session.
+Desktop monitor that starts a Grok or Cursor **watch-seat** agent, watches the process, and forwards IRC `FROM` lines into that session. The agent still connects to IRC per `agentic-irc`; the monitor tails `irc.log` only.
 
-The live copy on this machine is `Desktop\Watch-AgentHealth`.
+**Operator documentation:** [docs/operator-playbook.md](docs/operator-playbook.md) (launch, resume vs `new`, IRC homes, Restricted ExecutionPolicy, LOCKED vs UNKNOWN).
+
+**Feature request:** [Issue #1](https://github.com/SimonBarnett/AgentMonitor/issues/1). **MRB:** [Issue #3](https://github.com/SimonBarnett/AgentMonitor/issues/3). This repo does not stamp ready for human UAT.
 
 ## Launch
 
-Double-click a shortcut in `shortcuts\`, or run:
+From a copy of this repo (or your deployed `Watch-AgentHealth` folder), double-click a shortcut if you have one, or run:
 
 ```bat
 Watch-AgentHealth.cmd grok
@@ -15,8 +17,30 @@ Watch-AgentHealth.cmd cursor
 Watch-AgentHealth.cmd cursor new
 ```
 
-`new` starts a fresh session. Without `new`, the monitor resumes the stored session.
+- **`new`** — fresh session id (no skill reload from a prior resume).
+- **Without `new`** — resume the stored session.
 
-The one-click `.cmd` files (`Watch-AgentHealth-Grok-New.cmd` and the Cursor / Resume pairs) do the same thing. The desktop icons point at those scripts or at `Watch-AgentHealth.ps1` directly.
+One-click `.cmd` files in the repo root (`Watch-AgentHealth-Grok-New.cmd`, `Watch-AgentHealth-Cursor-Resume.cmd`, etc.) call the same script with `-WatchWorker -Grok|-Cursor` and optional `-New`.
 
-Log (not in git): `Watch-AgentHealth.log` next to the script.
+On **Restricted** ExecutionPolicy, use these `.cmd` wrappers (`-ExecutionPolicy Bypass`). Do not rely on `.\Watch-AgentHealth.ps1` alone.
+
+## IRC homes (watch seat only)
+
+- Grok: `%USERPROFILE%\.agentic-irc-watch-grok`
+- Cursor: `%USERPROFILE%\.agentic-irc-watch-cursor`
+
+Do not use talk-seat / bobiverse Watch homes (see playbook).
+
+## Log (not in git)
+
+Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`
+
+Session state: `%USERPROFILE%\.grok\agent-health\state-grok.json` or `state-cursor.json`.
+
+## Repo docs
+
+| Document | Purpose |
+|----------|---------|
+| [docs/operator-playbook.md](docs/operator-playbook.md) | Full operator contract |
+| [docs/feature-request-document-agentmonitor-2026-09-23.md](docs/feature-request-document-agentmonitor-2026-09-23.md) | FR / acceptance |
+| [docs/build-and-test-plan-document-agentmonitor-2026-09-23.md](docs/build-and-test-plan-document-agentmonitor-2026-09-23.md) | Build plan for this doc work |
