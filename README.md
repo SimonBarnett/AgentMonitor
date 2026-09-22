@@ -4,7 +4,7 @@ Desktop monitor that starts a Grok or Cursor **watch-seat** agent, watches the p
 
 **Operator documentation:** [docs/operator-playbook.md](docs/operator-playbook.md) (launch, resume vs `new`, IRC homes, Restricted ExecutionPolicy, LOCKED vs UNKNOWN).
 
-**MRB:** [Issue #1](https://github.com/SimonBarnett/AgentMonitor/issues/1). This repo does not stamp ready for human UAT.
+**Feature request:** [Issue #1](https://github.com/SimonBarnett/AgentMonitor/issues/1). **MRB:** [Issue #3](https://github.com/SimonBarnett/AgentMonitor/issues/3). This repo does not stamp ready for human UAT.
 
 ## Launch
 
