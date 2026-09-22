@@ -1,4 +1,4 @@
-# FR: Document AgentMonitor (issue #)
+# FR: Document AgentMonitor (issue #1)
 
 **Ask (Simon `#bobiverse` 2026-09-23):**
 https://github.com/SimonBarnett/AgentMonitor needs documenting please.
