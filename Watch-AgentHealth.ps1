@@ -428,6 +428,54 @@ function Initialize-WatchIrcHome {
     return $State
 }
 
+function Get-WatchIrcAgentRows {
+    param([string]$ResolvedHome)
+    $home = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
+    $esc = [regex]::Escape($home)
+    return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_agent\.py' -and $cl -match $esc
+        })
+}
+
+function Disconnect-WatchIrc {
+    param(
+        $State,
+        [string]$Reason = 'tui closed'
+    )
+    $home = [string]$State.ircHome
+    if (-not $home) { return }
+    $resolved = [IO.Path]::GetFullPath($home)
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
+        Write-WatchLog "irc disconnect skipped (forbidden home)"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $why = ([string]$Reason).Replace("`r", ' ').Replace("`n", ' ').Trim()
+    if (-not $why) { $why = 'tui closed' }
+    if ($why.Length -gt 80) { $why = $why.Substring(0, 80) }
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::WriteAllText((Join-Path $resolved 'quit.req'), $why, $utf8)
+    Write-WatchLog ("irc graceful PART+QUIT requested ({0}) home={1}" -f $why, $resolved)
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        if ((Get-WatchIrcAgentRows -ResolvedHome $resolved).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 400
+    }
+    $left = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    foreach ($row in $left) {
+        Write-WatchLog ("irc agent still up after QUIT wait pid={0} - stopping" -f $row.ProcessId)
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $listen = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_listen\.py' -and $cl -match [regex]::Escape($resolved)
+        })
+    foreach ($row in $listen) {
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     return @(
@@ -839,6 +887,7 @@ function Start-WatchedAgent {
             }
             else {
                 Write-CursorAgentProcessSnapshot -Reason 'cursor Composer not running (agent.cmd OOM or instant exit)'
+                Disconnect-WatchIrc -State $State -Reason 'tui closed'
                 $State = Set-CursorPrintOnlyMode -State $State -Enable
             }
         }
@@ -1010,6 +1059,7 @@ try {
                 $livePid = Resolve-CursorWatchRootPid -SessionId ([string]$state.sessionId) -LauncherPid $current.RootPid
                 if ($livePid -le 0) {
                     Write-WatchLog "cursor Composer not running session=$($state.sessionId) - print-only (no TUI relaunch)"
+                    Disconnect-WatchIrc -State $state -Reason 'tui closed'
                     if ($current.RootPid -gt 0) {
                         Stop-WatchedTree -RootPid $current.RootPid
                     }
@@ -1027,6 +1077,7 @@ try {
         }
         elseif (-not (Test-TreeHealthy -RootPid $current.RootPid)) {
             Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - restart (resume session $($state.sessionId))"
+            Disconnect-WatchIrc -State $state -Reason 'tui closed'
             Stop-WatchedTree -RootPid $current.RootPid
             $needStart = $true
             Start-Sleep -Seconds $CrashBackoffSeconds
@@ -1065,6 +1116,9 @@ catch {
     Write-WatchLog ("watch fatal: $($_.Exception.Message)")
 }
 finally {
+    if ($state) {
+        Disconnect-WatchIrc -State $state -Reason 'watch stop'
+    }
     if ($WatchWorker) {
         Unregister-WatchWorkerProcess
     }
