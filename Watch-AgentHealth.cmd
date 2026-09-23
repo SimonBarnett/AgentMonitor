@@ -24,7 +24,7 @@ if /i "%~3"=="new" set "PSARGS=%PSARGS% -New"
 if /i "%~3"=="off" set "HIDDEN=1"
 if "%HIDDEN%"=="1" (
     set "PSARGS=%PSARGS% -Windows off"
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Watch-AgentHealth.ps1" %PSARGS%
+    start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Watch-AgentHealth.ps1" %PSARGS%
     echo Watch monitor started hidden. Log: %USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log
     exit /b 0
 )
