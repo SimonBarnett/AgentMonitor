@@ -33,7 +33,7 @@ Watch-AgentHealth.cmd grok off
 
 - **`new`** — fresh session id.
 - **`off`** — hide both windows; log still writes. One-shot `agent -p` forwards stay hidden.
-- One-click `Watch-AgentHealth-*-*.cmd` do not pass `-Windows on`. `-Windows off` only when hidden.
+- One-click `Watch-AgentHealth-*-*.cmd` and Desktop shortcuts start **hidden** (`-Windows off`, no watch console, no TUI). Log still writes.
 
 Restricted ExecutionPolicy: use the `.cmd` wrappers (`-ExecutionPolicy Bypass`).
 

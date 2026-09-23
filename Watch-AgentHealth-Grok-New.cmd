@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -NoExit -File "%~dp0Watch-AgentHealth.ps1" -WatchWorker -Grok -New
+start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Watch-AgentHealth.ps1" -WatchWorker -Grok -New -Windows off
