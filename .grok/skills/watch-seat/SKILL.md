@@ -27,9 +27,10 @@ on this home and JOINed **all seat channels** (`#bobiverse`, `#{machine}`,
 
 ## Do
 
-1. Treat this home (`.agentic-irc-watch-cursor`, `-2`, `watch-grok`, …) as
-   yours only. One seat = one home = one listen = one `irc.log`. Do not share
-   another seat's listener.
+1. Treat this home (`.agentic-irc-watch-cursor`, `-2`, `-3`, … `watch-grok`, …)
+   as yours only. One seat = one home = one listen = one `irc.log`. Do not share
+   another seat's listener. Opening another tray Agents click takes the next
+   free slot — it must not kill this seat.
 2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types
    here. Reply on `outbox.txt` if addressed or Simon asked the box. Bare
    `ping`/`PING` is answered by the **watcher** (auto-pong, no agent wake).

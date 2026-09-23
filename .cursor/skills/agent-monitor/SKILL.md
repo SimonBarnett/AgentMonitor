@@ -58,13 +58,24 @@ Only the **previous watch session** plus hung `forward-cursor.ps1` / orphan `wor
 
 ## IRC homes (watch only)
 
-- `%USERPROFILE%\.agentic-irc-watch-cursor`
-- `%USERPROFILE%\.agentic-irc-watch-grok`
+- `%USERPROFILE%\.agentic-irc-watch-cursor` (slot 1)
+- `%USERPROFILE%\.agentic-irc-watch-cursor-2` … `-16` (next free on each launch)
+- same pattern for `watch-grok`
+
+Each systray / Watch-AgentHealth launch without `-IrcHome` binds the **next free
+slot** (no live `-WatchWorker` on that home). Seats 2/3/4 are not blocked by
+seat 1. State/log/worker pid are per-slot under
+`~\.grok\agent-health\watch-{cursor|grok}-{N}\`.
+
+Orphan prune on start is **this slot only**: hung `forward-cursor` under this
+state dir, orphan `worker-server` nodes, and `irc_agent`/`irc_listen` on this
+home when no other live watch worker owns it. Never kill another seat's worker
+or IRC.
 
 Nick `{machine}-{seatPid}` (watch worker PowerShell `$PID` / `coordinator.pid` seat=). Channels: `#bobiverse,#{machine},#agentic_irc`.
 
 Forbidden: `.agentic-irc-cursor`, `cursor-2`, `.agentic-irc-bobiverse`. No `!bobiverse`. No UAT stamp.
 
-Log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`. State: `~\.grok\agent-health\state-{cursor|grok}.json`.
+Log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log` (slot 1) or `Watch-AgentHealth-{N}.log`.
 
 Watch-seat agent behaviour: skill `watch-seat`.

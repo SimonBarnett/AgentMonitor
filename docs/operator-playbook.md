@@ -64,10 +64,14 @@ One-click equivalents and Desktop shortcuts are **`-Windows off`**: `wscript` + 
 
 ## IRC: own watch home only
 
-**LOCKED** — use only the watch IRC homes:
+**LOCKED** — use only the watch IRC homes (next free slot on each launch):
 
-- `%USERPROFILE%\.agentic-irc-watch-grok`
-- `%USERPROFILE%\.agentic-irc-watch-cursor`
+- `%USERPROFILE%\.agentic-irc-watch-grok` (+ `-2` … `-16`)
+- `%USERPROFILE%\.agentic-irc-watch-cursor` (+ `-2` … `-16`)
+
+Pass `-IrcHome` only to pin a slot. Default binds the next home with no live
+`Watch-AgentHealth -WatchWorker`. Orphan python/nodes pruned for **that slot
+only** on start.
 
 **Forbidden** (monitor refuses `-IrcHome` pointing here):
 
