@@ -21,11 +21,13 @@ Watch-AgentHealth.cmd cursor new off
 
 - **`new`** — fresh session id (no skill reload from a prior resume).
 - **Without `new`** — resume the stored session.
-- **`on`** (default) — visible watch console (IRC `irc-in` / `forward` lines print there) and visible agent TUI.
-- **`off`** — neither window; monitor log still receives lines. One-shot `agent -p` forwards stay hidden in both modes.
-- **`new` and `on`/`off`** may appear in either order on the main `.cmd`.
+- Visible by default (watch console + agent TUI). **No `on` flag.**
+- **`off`** — neither window; monitor log still receives lines. One-shot `agent -p` forwards stay hidden.
+- **`new` and `off`** may appear in either order on the main `.cmd`.
 
-One-click `.cmd` files in the repo root pass **`-Windows on`** (visible watch console and agent TUI). Change `on` to `off` in those files to run headless.
+One-click `.cmd` files in the repo root do not pass `-Windows`. Add `-Windows off` (or `off` on the main `.cmd`) to run headless.
+
+**Skills:** `.grok/skills/agent-monitor` and `.grok/skills/watch-seat` (also under `.cursor/skills/`).
 
 On **Restricted** ExecutionPolicy, use these `.cmd` wrappers (`-ExecutionPolicy Bypass`). Do not rely on `.\Watch-AgentHealth.ps1` alone.
 
