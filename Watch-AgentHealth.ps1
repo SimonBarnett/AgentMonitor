@@ -127,6 +127,9 @@ function Reset-WatchSessionForNew {
     if ($State.PSObject.Properties.Name -contains 'cursorSessionValid') {
         $State.PSObject.Properties.Remove('cursorSessionValid')
     }
+    if ($State.PSObject.Properties.Name -contains 'cursorChatCreated') {
+        $State.PSObject.Properties.Remove('cursorChatCreated')
+    }
     return $State
 }
 
@@ -198,15 +201,26 @@ function Test-CursorPrintOnlyMode {
 
 function Test-CursorAgentForwardBusy {
     param([string]$SessionId)
-    $sid = [regex]::Escape(([string]$SessionId).Trim())
-    if (-not $sid) { return $false }
-    $rows = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)
+    $sid = ([string]$SessionId).Trim()
+    $sidPat = if ($sid) { [regex]::Escape($sid) } else { '' }
+    $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     foreach ($row in $rows) {
         $cl = [string]$row.CommandLine
-        if ($cl -match 'cursor-agent' -and $cl -match $sid -and $cl -match ' -p ') {
+        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor\.ps1') {
+            return $true
+        }
+        if ($sidPat -and $cl -match 'cursor-agent' -and $cl -match $sidPat -and $cl -match ' -p ') {
             return $true
         }
     }
+    return $false
+}
+
+function Test-CursorAgentNodeIsProtected {
+    param([string]$CommandLine)
+    $cl = [string]$CommandLine
+    if ($cl -match 'Git task ') { return $true }
+    if ($cl -match 'long-running-background-tasks') { return $true }
     return $false
 }
 
@@ -294,21 +308,49 @@ function Write-CursorAgentProcessSnapshot {
     }
 }
 
-function Stop-CursorAgentNodesExceptSession {
-    param([string]$KeepSessionId)
-    $keep = ([string]$KeepSessionId).Trim()
-    if (-not $keep) { return 0 }
-    $pat = [regex]::Escape($keep)
+function Stop-CursorAgentNodesForSession {
+    param([string]$SessionId)
+    $sid = ([string]$SessionId).Trim()
+    if (-not $sid) { return 0 }
+    $pat = [regex]::Escape($sid)
     $stopped = 0
     $rows = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
             [string]$_.CommandLine -match 'cursor-agent'
         })
     foreach ($row in $rows) {
         $cl = [string]$row.CommandLine
-        if ($cl -match $pat) { continue }
-        Write-WatchLog ("prune stale cursor-agent pid={0} (not session {1})" -f $row.ProcessId, $keep.Substring(0, 8))
-        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+        if ($cl -notmatch $pat) { continue }
+        if (Test-CursorAgentNodeIsProtected -CommandLine $cl) {
+            Write-WatchLog ("prune skip protected cursor-agent pid={0} (Git/fleet job)" -f $row.ProcessId)
+            continue
+        }
+        Write-WatchLog ("prune watch-session cursor-agent pid={0} session={1}" -f $row.ProcessId, $sid.Substring(0, 8))
+        Stop-WatchedTree -RootPid ([int]$row.ProcessId)
         $stopped++
+    }
+    return $stopped
+}
+
+function Stop-OrphanCursorWatchForwards {
+    $stopped = 0
+    $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    foreach ($row in $rows) {
+        $cl = [string]$row.CommandLine
+        if (Test-CursorAgentNodeIsProtected -CommandLine $cl) { continue }
+        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor\.ps1') {
+            Write-WatchLog ("prune hung watch forward powershell pid={0}" -f $row.ProcessId)
+            Stop-WatchedTree -RootPid ([int]$row.ProcessId)
+            $stopped++
+            continue
+        }
+        if ([string]$row.Name -eq 'node.exe' -and $cl -match 'cursor-agent' -and $cl -match 'worker-server') {
+            $parent = Get-Process -Id ([int]$row.ParentProcessId) -ErrorAction SilentlyContinue
+            if (-not $parent) {
+                Write-WatchLog ("prune orphan worker-server pid={0}" -f $row.ProcessId)
+                Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+                $stopped++
+            }
+        }
     }
     return $stopped
 }
@@ -717,17 +759,21 @@ function Start-WatchedAgent {
 
     $resume = [bool]$State.seenSession
     if ($Cursor -and -not $resume) {
-        $head = Get-CommitHeadroomGb
-        if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.75) {
-            Write-WatchLog "low commit before create-chat ($($head.FreeGb) GB free) - pruning other cursor-agent nodes"
-            Stop-CursorAgentNodesExceptSession -KeepSessionId ([string]$State.sessionId) | Out-Null
-            Start-Sleep -Seconds 2
+        $chatDone = ($State.PSObject.Properties.Name -contains 'cursorChatCreated') -and [bool]$State.cursorChatCreated
+        if (-not $chatDone) {
+            $head = Get-CommitHeadroomGb
+            if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.75) {
+                Write-WatchLog "low commit before create-chat ($($head.FreeGb) GB free) - pruning orphan watch forwards only"
+                Stop-OrphanCursorWatchForwards | Out-Null
+                Start-Sleep -Seconds 2
+            }
+            $agentCmdForChat = Get-CursorAgentCmd
+            $chat = New-CursorChatSessionId -AgentCmd $agentCmdForChat -WorkDir $cwdFull
+            $State.sessionId = [string]$chat.SessionId
+            $State | Add-Member -NotePropertyName 'cursorSessionValid' -NotePropertyValue ([bool]$chat.ServerChat) -Force
+            $State | Add-Member -NotePropertyName 'cursorChatCreated' -NotePropertyValue $true -Force
+            Write-WatchLog "cursor new session id=$($State.sessionId) serverChat=$([bool]$chat.ServerChat)"
         }
-        $agentCmdForChat = Get-CursorAgentCmd
-        $chat = New-CursorChatSessionId -AgentCmd $agentCmdForChat -WorkDir $cwdFull
-        $State.sessionId = [string]$chat.SessionId
-        $State | Add-Member -NotePropertyName 'cursorSessionValid' -NotePropertyValue ([bool]$chat.ServerChat) -Force
-        Write-WatchLog "cursor new session id=$($State.sessionId) serverChat=$([bool]$chat.ServerChat)"
     }
     elseif (-not $State.sessionId) {
         $State.sessionId = [guid]::NewGuid().ToString()
@@ -735,6 +781,10 @@ function Start-WatchedAgent {
 
     if ($Cursor) {
         $agentCmd = Get-CursorAgentCmd
+        if (Test-CursorPrintOnlyMode -State $State) {
+            $State.rootPid = 0
+            return [pscustomobject]@{ Kind = 'cursor'; Exe = $agentCmd; Process = $null; RootPid = 0; State = $State }
+        }
         $sid = [string]$State.sessionId
         $useResumeTui = Test-CursorUseResumeForTui -State $State -ResumeShortcut:$resume
         $livePid = Resolve-CursorWatchRootPid -SessionId $sid -LauncherPid 0
@@ -763,6 +813,7 @@ function Start-WatchedAgent {
             }
             else {
                 Write-CursorAgentProcessSnapshot -Reason 'cursor Composer not running (agent.cmd OOM or instant exit)'
+                $State = Set-CursorPrintOnlyMode -State $State -Enable
             }
         }
         else {
@@ -770,9 +821,6 @@ function Start-WatchedAgent {
             $State.seenSession = $true
         }
         $State.rootPid = $livePid
-        if ($State.PSObject.Properties.Name -contains 'cursorPrintOnly') {
-            $State.PSObject.Properties.Remove('cursorPrintOnly')
-        }
         return [pscustomobject]@{ Kind = 'cursor'; Exe = $agentCmd; Process = $null; RootPid = $livePid; State = $State }
     }
 
@@ -892,14 +940,19 @@ if (-not $state) {
     }
 }
 if ($New) {
+    $oldWatchSid = [string]$state.sessionId
     $state = Reset-WatchSessionForNew -State $state
     $state.kind = $script:KindName
     Write-WatchState -Obj $state
     Write-WatchLog "session reset (--new) session=$($state.sessionId)"
     if ($Cursor) {
-        $n = Stop-CursorAgentNodesExceptSession -KeepSessionId ([string]$state.sessionId)
+        $n = 0
+        if ($oldWatchSid) {
+            $n += Stop-CursorAgentNodesForSession -SessionId $oldWatchSid
+        }
+        $n += Stop-OrphanCursorWatchForwards
         if ($n -gt 0) {
-            Write-WatchLog "cursor --new pruned $n stale cursor-agent node(s)"
+            Write-WatchLog "cursor --new pruned $n watch leftover node(s)"
             Start-Sleep -Seconds 2
         }
     }
@@ -923,21 +976,27 @@ try {
             $needStart = $true
         }
         elseif ($Cursor) {
-            $livePid = Resolve-CursorWatchRootPid -SessionId ([string]$state.sessionId) -LauncherPid $current.RootPid
-            if ($livePid -le 0) {
-                Write-WatchLog "cursor Composer not running session=$($state.sessionId) - relaunch visible TUI"
-                if ($current.RootPid -gt 0) {
-                    Stop-WatchedTree -RootPid $current.RootPid
-                }
-                $needStart = $true
-                Start-Sleep -Seconds $CrashBackoffSeconds
+            if (Test-CursorPrintOnlyMode -State $state) {
+                $current.RootPid = 0
+                $state.rootPid = 0
             }
             else {
-                if ($livePid -ne $current.RootPid) {
-                    $current.RootPid = $livePid
-                    $state.rootPid = $livePid
+                $livePid = Resolve-CursorWatchRootPid -SessionId ([string]$state.sessionId) -LauncherPid $current.RootPid
+                if ($livePid -le 0) {
+                    Write-WatchLog "cursor Composer not running session=$($state.sessionId) - print-only (no TUI relaunch)"
+                    if ($current.RootPid -gt 0) {
+                        Stop-WatchedTree -RootPid $current.RootPid
+                    }
+                    $state = Set-CursorPrintOnlyMode -State $state -Enable
+                    $current.RootPid = 0
                 }
-                $state = Sync-CursorSessionFromComposer -State $state -ComposerPid $livePid
+                else {
+                    if ($livePid -ne $current.RootPid) {
+                        $current.RootPid = $livePid
+                        $state.rootPid = $livePid
+                    }
+                    $state = Sync-CursorSessionFromComposer -State $state -ComposerPid $livePid
+                }
             }
         }
         elseif (-not (Test-TreeHealthy -RootPid $current.RootPid)) {
