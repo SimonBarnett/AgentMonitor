@@ -129,8 +129,8 @@ function Test-WatchSlotLive {
 }
 
 function Resolve-WatchSlotFromIrcHome {
-    param([string]$Home)
-    $leaf = Split-Path -Path $Home -Leaf
+    param([string]$WatchHomePath)
+    $leaf = Split-Path -Path $WatchHomePath -Leaf
     $prefix = '.agentic-irc-watch-{0}' -f $script:KindName
     if ($leaf -eq $prefix) { return 1 }
     $m = [regex]::Match($leaf, ('^{0}-(\d+)$' -f [regex]::Escape($prefix)))
@@ -1098,7 +1098,7 @@ if ($boundSlot) {
     $IrcHome = [string]$boundSlot.IrcHome
 }
 else {
-    $script:ClientSlot = Resolve-WatchSlotFromIrcHome -Home $IrcHome
+    $script:ClientSlot = Resolve-WatchSlotFromIrcHome -WatchHomePath $IrcHome
     $boundPaths = Get-WatchSlotPaths -Slot $script:ClientSlot
     $script:StatePath = [string]$boundPaths.StatePath
     $script:WorkerPidPath = [string]$boundPaths.WorkerPidPath
