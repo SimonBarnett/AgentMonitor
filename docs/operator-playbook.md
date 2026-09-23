@@ -50,7 +50,7 @@ Watch-AgentHealth.cmd cursor new off
 
 Visible by default. **No `on` flag.** `off` hides the watch console and agent TUI. `new` and `off` may be in either order.
 
-One-click equivalents and Desktop shortcuts start **hidden** (`-Windows off`; no watch console, no agent TUI):
+One-click equivalents and Desktop shortcuts are **`-Windows off`**: `wscript` + `Run-Hidden.vbs` so there is **no console window** and no agent TUI:
 
 | File | Effect |
 |------|--------|
