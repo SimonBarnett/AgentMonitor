@@ -296,6 +296,12 @@ function Get-CommitHeadroomGb {
     }
 }
 
+function Get-CursorTuiMissNodeWhy {
+    $head = Get-CommitHeadroomGb
+    if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.5) { return 'low commit' }
+    return 'launcher exited or node never appeared (not cmd.exe prompt-on-argv)'
+}
+
 function Write-CursorAgentProcessSnapshot {
     param([string]$Reason)
     $rows = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
@@ -762,8 +768,7 @@ function Start-CursorInteractiveTui {
     Start-Sleep -Seconds 8
     $livePid = Resolve-CursorWatchRootPid -SessionId $SessionId -LauncherPid $launcherPid
     if ($livePid -le 0) {
-        $head = Get-CommitHeadroomGb
-        $why = if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.5) { 'low commit' } else { 'launcher exited or node never appeared (not cmd.exe prompt-on-argv)' }
+        $why = Get-CursorTuiMissNodeWhy
         Write-WatchLog ("cursor TUI agent pid=$launcherPid but Composer node missing ($why); stopping agent launcher")
         Stop-WatchedTree -RootPid $launcherPid
         return 0
@@ -874,9 +879,11 @@ function Start-WatchedAgent {
                 Write-WatchLog "cursor Resume: spawning Composer TUI window=$($script:AgentTuiWindowStyle) (resume attach)"
             }
             $head = Get-CommitHeadroomGb
+            $refusedLowCommit = $false
             if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.5) {
                 Write-CursorAgentProcessSnapshot -Reason 'refusing TUI spawn (need ~0.5GB+ free commit)'
                 $livePid = 0
+                $refusedLowCommit = $true
             }
             else {
                 $livePid = Start-CursorInteractiveTui -AgentCmd $agentCmd -WorkDir $cwdFull -SessionId $sid -PromptPath $tuiPromptPath -ResumeOnly:$resume -UseResume:$useResumeTui
@@ -886,8 +893,10 @@ function Start-WatchedAgent {
                 $State.seenSession = $true
             }
             else {
-                Write-CursorAgentProcessSnapshot -Reason 'cursor Composer not running (agent.cmd OOM or instant exit)'
-                Disconnect-WatchIrc -State $State -Reason 'tui closed'
+                if (-not $refusedLowCommit) {
+                    $why = Get-CursorTuiMissNodeWhy
+                    Write-CursorAgentProcessSnapshot -Reason "cursor Composer not running ($why)"
+                }
                 $State = Set-CursorPrintOnlyMode -State $State -Enable
             }
         }
