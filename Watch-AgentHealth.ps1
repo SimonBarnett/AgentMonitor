@@ -1300,7 +1300,9 @@ try {
     while ($true) {
         try {
         # Keep IRC up while the seat is live (agent+listen on all channels).
-        if (-not (Test-CursorPrintOnlyMode -State $state) -or $script:KindName -eq 'grok') {
+        # Cursor print-only after TUI exit: do not reconnect (Disconnect already ran).
+        $skipIrc = $Cursor -and (Test-CursorPrintOnlyMode -State $state)
+        if (-not $skipIrc) {
             $ag = @(Get-WatchIrcAgentRows -ResolvedHome ([string]$state.ircHome))
             $li = @(Get-WatchIrcListenRows -ResolvedHome ([string]$state.ircHome))
             if ($ag.Count -eq 0 -or $li.Count -eq 0) {
