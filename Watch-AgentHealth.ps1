@@ -568,10 +568,11 @@ function Sync-IrcForward {
     $fs = [IO.File]::Open($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
         if ($offset -gt $fs.Length) { $offset = 0 }
+        $utf8 = New-Object System.Text.UTF8Encoding $false
         [void]$fs.Seek($offset, [IO.SeekOrigin]::Begin)
         while ($fs.Position -lt $fs.Length) {
             $lineStart = $fs.Position
-            $sb = New-Object System.Text.StringBuilder
+            $lineBytes = New-Object System.Collections.Generic.List[byte]
             $complete = $false
             while ($fs.Position -lt $fs.Length) {
                 $b = $fs.ReadByte()
@@ -588,16 +589,17 @@ function Sync-IrcForward {
                         }
                         [void]$fs.Seek(-1, [IO.SeekOrigin]::Current)
                     }
-                    [void]$sb.Append([char]13)
+                    $lineBytes.Add([byte]13)
                     continue
                 }
-                [void]$sb.Append([char]$b)
+                $lineBytes.Add([byte]$b)
             }
             if (-not $complete) {
                 [void]$fs.Seek($lineStart, [IO.SeekOrigin]::Begin)
                 break
             }
-            $from = Convert-IrcRawLineToFromLine -Raw ($sb.ToString())
+            $raw = $utf8.GetString($lineBytes.ToArray())
+            $from = Convert-IrcRawLineToFromLine -Raw $raw
             if ($from) {
                 $State = Send-IrcLineToSession -State $State -Line $from
             }
