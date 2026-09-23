@@ -17,7 +17,7 @@ AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It s
 | Health-check / restart crashed agent tree | Monitor |
 | Start, stop, or health-check `irc_listen` | **Not** the monitor |
 
-The hidden **watch worker** (`-WatchWorker`) runs the loop. The entry `.cmd` files spawn it with `-ExecutionPolicy Bypass` and open the visible Composer / Grok TUI (no extra PowerShell TUI launcher).
+The **watch worker** (`-WatchWorker`) runs the monitor loop. With **`-Windows on`** (default), the worker console stays visible and IRC `irc-in` / `forward` lines echo there; the Composer / Grok TUI opens in a normal window. With **`-Windows off`**, the worker and agent TUI are hidden; the log file still receives lines. One-shot `agent -p` forwards stay hidden in both modes.
 
 ---
 
@@ -44,9 +44,13 @@ Watch-AgentHealth.cmd grok
 Watch-AgentHealth.cmd grok new
 Watch-AgentHealth.cmd cursor
 Watch-AgentHealth.cmd cursor new
+Watch-AgentHealth.cmd grok off
+Watch-AgentHealth.cmd cursor new off
 ```
 
-One-click equivalents:
+`on` (default) and `off` control whether the watch console and agent TUI are shown; `new` and `on`/`off` may be in either order.
+
+One-click equivalents (each passes **`-Windows on`**; edit to `off` for headless):
 
 | File | Effect |
 |------|--------|
@@ -105,7 +109,7 @@ Use:
 - Any `Watch-AgentHealth*.cmd` in this repo (they call `powershell.exe -NoProfile -ExecutionPolicy Bypass`), or
 - An equivalent manual invoke with `-ExecutionPolicy Bypass`.
 
-The main wrapper also uses `-WindowStyle Hidden` for the worker and passes `-WatchWorker`.
+The main wrapper passes `-WatchWorker`. **`-Windows on`** runs the worker in the visible console (`-NoExit` so startup errors stay on screen). **`-Windows off`** starts a hidden worker (`-WindowStyle Hidden`).
 
 ---
 
@@ -144,7 +148,7 @@ Do not commit logs, state files, IRC homes, or secrets.
 6. Launch via `.cmd` / `-ExecutionPolicy Bypass` on Restricted policy boxes.
 7. Workspace `\ai` on D:..Z: unless `-Cwd` passed.
 8. No UAT stamp; no `!bobiverse`.
-9. Hidden `-WatchWorker`; opens Cursor Composer / Grok TUI directly.
+9. `-Windows on|off` (default `on`): visible watch console + visible agent TUI, or both hidden; one-shot `agent -p` forwards stay hidden.
 
 ### UNKNOWN
 
@@ -161,5 +165,6 @@ For operators who invoke `Watch-AgentHealth.ps1` with Bypass (not typical day-to
 - `-Cwd` — explicit workspace.
 - `-PollSeconds` (default 15), `-CrashBackoffSeconds` (default 20).
 - `-LogPath` — alternate monitor log file.
+- `-Windows on|off` (default `on`) — show both terminals or neither.
 
-Entry via `.cmd` always includes `-WatchWorker`; the outer process exits after spawning the hidden worker.
+Entry via `.cmd` always includes `-WatchWorker`. With `-Windows off`, the outer `.cmd` spawns a hidden worker and exits; with `on`, the worker runs in the visible console.
