@@ -2,6 +2,8 @@
 
 https://github.com/SimonBarnett/AgentMonitor/issues/22
 
+**MRB:** [Issue #27](https://github.com/SimonBarnett/AgentMonitor/issues/27) (Bob chairs). **Land:** [PR #23](https://github.com/SimonBarnett/AgentMonitor/pull/23) (`73e86a9`). [PR #26](https://github.com/SimonBarnett/AgentMonitor/pull/26) (`71d0e615`) is a closed duplicate of the same tree as `main`; do not reopen or merge.
+
 Simon paste 2026-09-23, `windows=on`, kind=cursor, cwd=`E:\ai`. No UAT.
 
 ## LOCKED (issue #22 log)
