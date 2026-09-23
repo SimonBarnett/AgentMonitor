@@ -50,7 +50,7 @@ Watch-AgentHealth.cmd cursor new off
 
 Visible by default. **No `on` flag.** `off` hides the watch console and agent TUI. `new` and `off` may be in either order.
 
-One-click equivalents (no `-Windows on`; add `-Windows off` for headless):
+One-click equivalents and Desktop shortcuts start **hidden** (`-Windows off`; no watch console, no agent TUI):
 
 | File | Effect |
 |------|--------|
@@ -148,7 +148,7 @@ Do not commit logs, state files, IRC homes, or secrets.
 6. Launch via `.cmd` / `-ExecutionPolicy Bypass` on Restricted policy boxes.
 7. Workspace `\ai` on D:..Z: unless `-Cwd` passed.
 8. No UAT stamp; no `!bobiverse`.
-9. Visible by default (no `on` flag). `-Windows off` hides both windows; one-shot `agent -p` forwards stay hidden.
+9. Main `.cmd` is visible by default (no `on` flag). One-click shortcuts start hidden (`-Windows off`). One-shot `agent -p` forwards stay hidden.
 
 ### UNKNOWN
 
@@ -167,6 +167,6 @@ For operators who invoke `Watch-AgentHealth.ps1` with Bypass (not typical day-to
 - `-LogPath` — alternate monitor log file.
 - `-Windows off` — hide both terminals (default is visible).
 
-Entry via `.cmd` always includes `-WatchWorker`. With `off`, the outer `.cmd` spawns a hidden worker and exits; otherwise the worker runs in the visible console.
+Entry via the main `.cmd` includes `-WatchWorker`. With `off` (or any one-click shortcut), a hidden worker starts and the launcher exits. Otherwise the worker runs in the visible console.
 
 **Skills** (what the monitor vs watch-seat agent do): `.grok/skills/agent-monitor/SKILL.md`, `.grok/skills/watch-seat/SKILL.md`.

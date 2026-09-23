@@ -25,7 +25,7 @@ Watch-AgentHealth.cmd cursor new off
 - **`off`** — neither window; monitor log still receives lines. One-shot `agent -p` forwards stay hidden.
 - **`new` and `off`** may appear in either order on the main `.cmd`.
 
-One-click `.cmd` files in the repo root do not pass `-Windows`. Add `-Windows off` (or `off` on the main `.cmd`) to run headless.
+One-click `.cmd` files and Desktop shortcuts start in the background (`-Windows off`). The main `.cmd` is still visible unless you pass `off`.
 
 **Skills:** `.grok/skills/agent-monitor` and `.grok/skills/watch-seat` (also under `.cursor/skills/`).
 
