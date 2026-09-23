@@ -744,10 +744,10 @@ function Start-WatchedAgent {
                 $seedFile = Join-Path $script:StateDir 'cursor-tui-seed.prompt.txt'
                 [IO.File]::WriteAllText($seedFile, (Get-CursorSeedPrompt -ResolvedIrcHome $resolvedHome), $utf8)
                 $tuiPromptPath = $seedFile
-                Write-WatchLog "cursor New: Composer TUI window=$($script:AgentTuiWindowStyle) (short seed); IRC forwards stay hidden agent -p"
+                Write-WatchLog "cursor New: spawning Composer TUI window=$($script:AgentTuiWindowStyle) (short seed); IRC forwards stay hidden agent -p"
             }
             else {
-                Write-WatchLog "cursor Resume: Composer TUI window=$($script:AgentTuiWindowStyle) (resume attach)"
+                Write-WatchLog "cursor Resume: spawning Composer TUI window=$($script:AgentTuiWindowStyle) (resume attach)"
             }
             $head = Get-CommitHeadroomGb
             if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.5) {
@@ -954,9 +954,15 @@ try {
             $state = $started.State
             $state.rootPid = $started.RootPid
             Write-WatchState -Obj $state
-            Write-WatchLog "started kind=$($started.Kind) exe=$($started.Exe) rootPid=$($started.RootPid) session=$($state.sessionId) firstRun=$firstRun"
-            if ($Cursor) {
-                Write-WatchLog "cursor seat: Composer TUI window=$($script:AgentTuiWindowStyle); IRC wakes use hidden agent -p"
+            if ($Cursor -and $started.RootPid -le 0) {
+                $noTui = if ($Windows -eq 'on') { ' (no live Composer TUI; windows=on)' } else { '' }
+                Write-WatchLog "cursor composer not live$noTui session=$($state.sessionId) firstRun=$firstRun exe=$($started.Exe)"
+            }
+            else {
+                Write-WatchLog "started kind=$($started.Kind) exe=$($started.Exe) rootPid=$($started.RootPid) session=$($state.sessionId) firstRun=$firstRun"
+                if ($Cursor -and $started.RootPid -gt 0) {
+                    Write-WatchLog "cursor seat: Composer TUI window=$($script:AgentTuiWindowStyle); IRC wakes use hidden agent -p"
+                }
             }
         }
 
