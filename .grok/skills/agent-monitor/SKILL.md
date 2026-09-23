@@ -20,6 +20,8 @@ Deterministic **watch-seat** monitor (`Watch-AgentHealth.ps1`). It is not the IR
 
 The agent does not run, restart, or reimplement the monitor. The monitor does not start/stop `irc_listen`. Each client starts **its own** `irc_listen` on **its** slot home. Sharing one listener would duplicate every PRIVMSG into every connected agent.
 
+Fleet: this is the **only** way to create a persistent build-worker seat (`watch-agent-health` / `Start-BobWatchWorker.ps1` in `agentic_build`). Not Start-TalkSeat.
+
 ## Launch
 
 Visible by default (watch console + agent TUI). There is **no `on` flag**.
