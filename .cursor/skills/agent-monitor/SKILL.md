@@ -45,7 +45,7 @@ Launch via `cursor-agent.ps1` and a **prompt file** (`launch-cursor-tui.ps1`, `-
 
 If Composer never appears: print-only, no TUI relaunch storm, `create-chat` once per `--new`. Hidden `agent -p` forwards stay available.
 
-When the TUI exits for **any** reason (close, OOM, missing node): write `$IrcHome/quit.req`. `irc_agent` PARTs every watch channel then `QUIT :tui closed` and does not reconnect on that socket. Only then may a later TUI/agent JOIN again. Watch home only. Never PART talk-seat / bobiverse homes.
+When the TUI exits for **any** reason (close, OOM, missing node): write `$IrcHome/agent.quit.request` and `$IrcHome/quit.req`. `irc_agent` PARTs every watch channel then QUITs and does not reconnect on that socket. Only then may a later TUI/agent JOIN again. Watch home only. Never PART talk-seat / bobiverse homes.
 
 ## `--new` prune
 

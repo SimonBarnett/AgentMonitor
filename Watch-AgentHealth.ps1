@@ -462,6 +462,20 @@ function Disconnect-WatchIrc {
     if ($why.Length -gt 80) { $why = $why.Substring(0, 80) }
     $utf8 = New-Object System.Text.UTF8Encoding $false
     [IO.File]::WriteAllText((Join-Path $resolved 'quit.req'), $why, $utf8)
+    $epoch = [int][double](Get-Date -UFormat %s)
+    $ctrlLine = '{0} {1}' -f $epoch, $why
+    [IO.File]::WriteAllText((Join-Path $resolved 'agent.quit.request'), $ctrlLine + [Environment]::NewLine, $utf8)
+    $ctrlPy = @(
+        'C:\ai\agentic_irc\scripts\agent_control.py',
+        'D:\ai\agentic_irc\scripts\agent_control.py',
+        (Join-Path $env:USERPROFILE '.grok\skills\agentic-irc\scripts\agent_control.py')
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($ctrlPy) {
+        $py = (Get-Command python -ErrorAction SilentlyContinue)
+        if ($py) {
+            Start-Process -FilePath $py.Source -ArgumentList @('-u', $ctrlPy, '--home', $resolved, '--reason', $why, '--request-only') -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+        }
+    }
     Write-WatchLog ("irc graceful PART+QUIT requested ({0}) home={1}" -f $why, $resolved)
     $deadline = (Get-Date).AddSeconds(8)
     while ((Get-Date) -lt $deadline) {
