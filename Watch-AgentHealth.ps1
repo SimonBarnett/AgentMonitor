@@ -954,14 +954,14 @@ try {
             $state = $started.State
             $state.rootPid = $started.RootPid
             Write-WatchState -Obj $state
-            $tuiLive = ($started.RootPid -gt 0)
-            Write-WatchLog "started kind=$($started.Kind) exe=$($started.Exe) rootPid=$($started.RootPid) tuiLive=$tuiLive session=$($state.sessionId) firstRun=$firstRun"
-            if ($Cursor) {
-                if ($tuiLive) {
+            if ($Cursor -and $started.RootPid -le 0) {
+                $noTui = if ($Windows -eq 'on') { ' (no live Composer TUI; windows=on)' } else { '' }
+                Write-WatchLog "cursor composer not live$noTui session=$($state.sessionId) firstRun=$firstRun exe=$($started.Exe)"
+            }
+            else {
+                Write-WatchLog "started kind=$($started.Kind) exe=$($started.Exe) rootPid=$($started.RootPid) session=$($state.sessionId) firstRun=$firstRun"
+                if ($Cursor -and $started.RootPid -gt 0) {
                     Write-WatchLog "cursor seat: Composer TUI window=$($script:AgentTuiWindowStyle); IRC wakes use hidden agent -p"
-                }
-                else {
-                    Write-WatchLog "cursor seat: Composer TUI not live; IRC wakes use hidden agent -p"
                 }
             }
         }
