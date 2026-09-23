@@ -8,6 +8,8 @@
   Monitor tails $IrcHome/irc.log (agent debug firehose) and resume-forwards each PRIVMSG as FROM into the agent.
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
+  Multiple clients per box: next free slot (watch-cursor, watch-cursor-2, …). Never restart a live seat.
+  TUI exit: QUIT that slot only. Start another client; do not reconnect the same one.
   Does not stamp UAT. Does not send !bobiverse.
 
 .EXAMPLE
@@ -81,10 +83,70 @@ $Cwd = Resolve-AgentWorkspace -Requested $Cwd -Explicit:$CwdExplicit
 
 $script:KindName = $(if ($Cursor) { 'cursor' } else { 'grok' })
 $script:StateDir = Join-Path $env:USERPROFILE '.grok\agent-health'
+$script:ClientSlot = 1
 $script:StatePath = Join-Path $script:StateDir ("state-{0}.json" -f $script:KindName)
 $script:WorkerPidPath = Join-Path $script:StateDir ("watch-worker-{0}.pid" -f $script:KindName)
+$script:IrcHomeExplicit = $PSBoundParameters.ContainsKey('IrcHome') -and $IrcHome
 if (-not $IrcHome) {
     $IrcHome = Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}' -f $script:KindName)
+}
+
+function Get-WatchSlotPaths {
+    param([int]$Slot)
+    $suffix = if ($Slot -le 1) { '' } else { '-{0}' -f $Slot }
+    return [pscustomobject]@{
+        Slot          = $Slot
+        Suffix        = $suffix
+        StatePath     = Join-Path $script:StateDir ('state-{0}{1}.json' -f $script:KindName, $suffix)
+        WorkerPidPath = Join-Path $script:StateDir ('watch-worker-{0}{1}.pid' -f $script:KindName, $suffix)
+        IrcHome       = Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}{1}' -f $script:KindName, $suffix)
+    }
+}
+
+function Test-WatchSlotLive {
+    param([int]$Slot)
+    $paths = Get-WatchSlotPaths -Slot $Slot
+    if (Test-Path -LiteralPath $paths.WorkerPidPath) {
+        try {
+            $old = [int](Get-Content -LiteralPath $paths.WorkerPidPath -Raw)
+        }
+        catch { $old = 0 }
+        if ($old -gt 0 -and (Get-Process -Id $old -ErrorAction SilentlyContinue)) {
+            return $true
+        }
+    }
+    $home = [IO.Path]::GetFullPath($paths.IrcHome).TrimEnd('\')
+    $esc = [regex]::Escape($home)
+    $irc = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_agent\.py' -and $cl -match $esc
+        })
+    return ($irc.Count -gt 0)
+}
+
+function Resolve-WatchSlotFromIrcHome {
+    param([string]$Home)
+    $leaf = Split-Path -Path $Home -Leaf
+    $prefix = '.agentic-irc-watch-{0}' -f $script:KindName
+    if ($leaf -eq $prefix) { return 1 }
+    $m = [regex]::Match($leaf, ('^{0}-(\d+)$' -f [regex]::Escape($prefix)))
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return 1
+}
+
+function Bind-WatchClientSlot {
+    if ($script:IrcHomeExplicit) { return $null }
+    $chosen = 0
+    for ($i = 1; $i -le 8; $i++) {
+        if (-not (Test-WatchSlotLive -Slot $i)) {
+            $chosen = $i
+            break
+        }
+    }
+    if ($chosen -le 0) {
+        throw 'Too many watch clients on this box (8). Do not restart a live seat; start a new one only if a slot is free.'
+    }
+    return (Get-WatchSlotPaths -Slot $chosen)
 }
 
 function Write-WatchLog {
@@ -205,14 +267,31 @@ function Test-CursorPrintOnlyMode {
     return ($State.PSObject.Properties.Name -contains 'cursorPrintOnly') -and [bool]$State.cursorPrintOnly
 }
 
+function Get-WatchForwardScriptLeaf {
+    if ($script:ClientSlot -le 1) { return 'forward-cursor.ps1' }
+    return ('forward-cursor-{0}.ps1' -f $script:ClientSlot)
+}
+
+function Set-WatchForwardPaths {
+    $leaf = Get-WatchForwardScriptLeaf
+    $script:ForwardScriptPath = Join-Path $script:StateDir $leaf
+    if ($script:ClientSlot -le 1) {
+        $script:ForwardPromptPath = Join-Path $script:StateDir 'forward-cursor.prompt.txt'
+    }
+    else {
+        $script:ForwardPromptPath = Join-Path $script:StateDir ('forward-cursor-{0}.prompt.txt' -f $script:ClientSlot)
+    }
+}
+
 function Test-CursorAgentForwardBusy {
     param([string]$SessionId)
     $sid = ([string]$SessionId).Trim()
     $sidPat = if ($sid) { [regex]::Escape($sid) } else { '' }
+    $fwdLeaf = [regex]::Escape((Get-WatchForwardScriptLeaf))
     $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     foreach ($row in $rows) {
         $cl = [string]$row.CommandLine
-        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor\.ps1') {
+        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match $fwdLeaf) {
             return $true
         }
         if ($sidPat -and $cl -match 'cursor-agent' -and $cl -match $sidPat -and $cl -match ' -p ') {
@@ -349,8 +428,9 @@ function Stop-OrphanCursorWatchForwards {
     foreach ($row in $rows) {
         $cl = [string]$row.CommandLine
         if (Test-CursorAgentNodeIsProtected -CommandLine $cl) { continue }
-        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor\.ps1') {
-            Write-WatchLog ("prune hung watch forward powershell pid={0}" -f $row.ProcessId)
+        $fwdLeaf = [regex]::Escape((Get-WatchForwardScriptLeaf))
+        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match $fwdLeaf) {
+            Write-WatchLog ("prune hung watch forward powershell pid={0} slot={1}" -f $row.ProcessId, $script:ClientSlot)
             Stop-WatchedTree -RootPid ([int]$row.ProcessId)
             $stopped++
             continue
@@ -614,10 +694,11 @@ function Send-IrcLineToSession {
         return $State
     }
     $agentCmd = Get-CursorAgentCmd
-    $fwd = Join-Path $script:StateDir 'forward-cursor.prompt.txt'
+    $fwd = $script:ForwardPromptPath
+    if (-not $fwd) { Set-WatchForwardPaths; $fwd = $script:ForwardPromptPath }
     $utf8 = New-Object System.Text.UTF8Encoding $false
     [IO.File]::WriteAllText($fwd, $text, $utf8)
-    $launch = Join-Path $script:StateDir 'forward-cursor.ps1'
+    $launch = $script:ForwardScriptPath
     $escFwd = $fwd.Replace("'", "''")
     $escCwd = $cwdFull.Replace("'", "''")
     $escAgent = $agentCmd.Replace("'", "''")
@@ -955,14 +1036,15 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($Cursor) { $workerArgs += '-Cursor' }
     if ($New) { $workerArgs += '-New' }
     if ($PSBoundParameters.ContainsKey('Cwd')) { $workerArgs += @('-Cwd', $Cwd) }
-    if ($PSBoundParameters.ContainsKey('IrcHome')) { $workerArgs += @('-IrcHome', $IrcHome) }
+    $workerArgs += @('-IrcHome', $IrcHome)
     if ($PSBoundParameters.ContainsKey('PollSeconds')) { $workerArgs += @('-PollSeconds', [string]$PollSeconds) }
     if ($PSBoundParameters.ContainsKey('CrashBackoffSeconds')) { $workerArgs += @('-CrashBackoffSeconds', [string]$CrashBackoffSeconds) }
-    if ($PSBoundParameters.ContainsKey('LogPath')) { $workerArgs += @('-LogPath', $LogPath) }
-    $log = $LogPath
+    $log = $script:LogFile
+    if (-not $log) { $log = $LogPath }
     if (-not $log) {
         $log = Join-Path $env:USERPROFILE 'Desktop\Watch-AgentHealth\Watch-AgentHealth.log'
     }
+    $workerArgs += @('-LogPath', $log)
     New-Item -ItemType File -Force -Path $log | Out-Null
     $proc = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList $workerArgs -WindowStyle Hidden -PassThru
     $boot = '{0:o} hidden watch monitor pid={1} (-Windows off; log={2})' -f [datetime]::UtcNow, $proc.Id, $log
@@ -983,26 +1065,10 @@ function Register-WatchWorkerProcess {
         if ($cl -notmatch 'Watch-AgentHealth\.ps1') { continue }
         if ($cl -notmatch '-WatchWorker') { continue }
         if ($cl -notmatch [regex]::Escape($kindFlag)) { continue }
-        Write-WatchLog "closing stale watch worker pid=$opid"
-        Stop-Process -Id $opid -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Milliseconds 400
-    if (Test-Path -LiteralPath $script:WorkerPidPath) {
-        try {
-            $old = [int](Get-Content -LiteralPath $script:WorkerPidPath -Raw -ErrorAction Stop)
-        }
-        catch { $old = 0 }
-        if ($old -gt 0 -and $old -ne $self) {
-            $oldProc = Get-Process -Id $old -ErrorAction SilentlyContinue
-            if ($oldProc) {
-                Write-WatchLog "replacing previous watch worker pid=$old"
-                Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Milliseconds 400
-            }
-        }
+        Write-WatchLog "keeping live watch worker pid=$opid (multiple clients; not replacing)"
     }
     Set-Content -LiteralPath $script:WorkerPidPath -Value ([string]$self) -Encoding ascii -NoNewline
-    Write-WatchLog "watch worker online pid=$self kind=$($script:KindName)"
+    Write-WatchLog "watch worker online pid=$self kind=$($script:KindName) slot=$($script:ClientSlot) ircHome=$IrcHome"
 }
 
 function Unregister-WatchWorkerProcess {
@@ -1016,9 +1082,25 @@ function Unregister-WatchWorkerProcess {
     catch { }
 }
 
+$boundSlot = Bind-WatchClientSlot
+if ($boundSlot) {
+    $script:ClientSlot = [int]$boundSlot.Slot
+    $script:StatePath = [string]$boundSlot.StatePath
+    $script:WorkerPidPath = [string]$boundSlot.WorkerPidPath
+    $IrcHome = [string]$boundSlot.IrcHome
+}
+else {
+    $script:ClientSlot = Resolve-WatchSlotFromIrcHome -Home $IrcHome
+    $boundPaths = Get-WatchSlotPaths -Slot $script:ClientSlot
+    $script:StatePath = [string]$boundPaths.StatePath
+    $script:WorkerPidPath = [string]$boundPaths.WorkerPidPath
+}
+Set-WatchForwardPaths
+
 $script:LogFile = $LogPath
 if (-not $script:LogFile) {
-    $script:LogFile = Join-Path $env:USERPROFILE 'Desktop\Watch-AgentHealth\Watch-AgentHealth.log'
+    $logLeaf = if ($script:ClientSlot -le 1) { 'Watch-AgentHealth.log' } else { 'Watch-AgentHealth-{0}.log' -f $script:ClientSlot }
+    $script:LogFile = Join-Path $env:USERPROFILE ('Desktop\Watch-AgentHealth\{0}' -f $logLeaf)
 }
 
 New-Item -ItemType File -Force -Path $script:LogFile | Out-Null
@@ -1061,15 +1143,19 @@ if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
 $state = Initialize-IrcLogTail -State $state
-Write-WatchLog "watch start kind=$($script:KindName) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
+Write-WatchLog "watch start kind=$($script:KindName) slot=$($script:ClientSlot) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
 
 $current = $null
 try {
     Write-WatchState -Obj $state
 
+    $script:LeaveWatch = $false
     while ($true) {
         try {
         $needStart = $false
+        if ($script:LeaveWatch) {
+            break
+        }
         if (-not $current) {
             $needStart = $true
         }
@@ -1081,13 +1167,15 @@ try {
             else {
                 $livePid = Resolve-CursorWatchRootPid -SessionId ([string]$state.sessionId) -LauncherPid $current.RootPid
                 if ($livePid -le 0) {
-                    Write-WatchLog "cursor Composer not running session=$($state.sessionId) - print-only (no TUI relaunch)"
+                    Write-WatchLog "cursor Composer not running session=$($state.sessionId) - QUIT this slot; start a new client (do not restart this seat)"
                     Disconnect-WatchIrc -State $state -Reason 'tui closed'
                     if ($current.RootPid -gt 0) {
                         Stop-WatchedTree -RootPid $current.RootPid
                     }
                     $state = Set-CursorPrintOnlyMode -State $state -Enable
                     $current.RootPid = 0
+                    $script:LeaveWatch = $true
+                    break
                 }
                 else {
                     if ($livePid -ne $current.RootPid) {
@@ -1099,11 +1187,12 @@ try {
             }
         }
         elseif (-not (Test-TreeHealthy -RootPid $current.RootPid)) {
-            Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - restart (resume session $($state.sessionId))"
+            Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - QUIT IRC; start a new client (do not restart this seat)"
             Disconnect-WatchIrc -State $state -Reason 'tui closed'
             Stop-WatchedTree -RootPid $current.RootPid
-            $needStart = $true
-            Start-Sleep -Seconds $CrashBackoffSeconds
+            $current.RootPid = 0
+            $script:LeaveWatch = $true
+            break
         }
 
         if ($needStart) {

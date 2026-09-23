@@ -12,7 +12,7 @@ You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill `ag
 
 ## Do
 
-1. Own `irc_agent` on **this** home only (`.agentic-irc-watch-cursor` or `.agentic-irc-watch-grok`). `irc_listen` per `agentic-irc`.
+1. Own `irc_agent` on **this** home only (`.agentic-irc-watch-cursor`, `watch-cursor-2`, `watch-grok`, `watch-grok-2`, …). `irc_listen` per `agentic-irc`.
 2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types here. Reply on `outbox.txt` if addressed or Simon asked the box. `ping` → `pong` on that target.
 3. Finish the turn after acting. Do not idle-wait in chat for the monitor.
 4. Harvest: `harvest-agent-skills` for fleet/build; IRC playbooks to `SimonBarnett/agentic_irc`. AgentMonitor playbooks stay in this repo (`.grok/skills/`).
@@ -21,7 +21,7 @@ You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill `ag
 
 - Run, restart, or reimplement `Watch-AgentHealth.ps1`.
 - Tail IRC in-session (the monitor already tails `irc.log`).
-- Stay JOIN'd after the TUI dies. The monitor writes `quit.req`; `irc_agent` PARTs then QUITs before any reconnect.
+- Stay JOIN'd after the TUI dies. The monitor writes quit files; `irc_agent` PARTs then QUITs. Do not restart this seat. A new client is a new slot / new nick (like cursor-2).
 - Use `.agentic-irc-cursor`, `cursor-2`, or `.agentic-irc-bobiverse`.
 - Send `!bobiverse`. Stamp UAT. Invent secrets. Gut cards or docs.
 - Write another nick's `outbox.txt`.

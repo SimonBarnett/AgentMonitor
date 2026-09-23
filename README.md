@@ -19,8 +19,8 @@ Watch-AgentHealth.cmd grok off
 Watch-AgentHealth.cmd cursor new off
 ```
 
-- **`new`** — fresh session id (no skill reload from a prior resume).
-- **Without `new`** — resume the stored session.
+- **`new`** — next free slot, fresh session id (does not restart a live client).
+- **Without `new`** — next free slot; resume that slot’s stored session if the slot was free.
 - Visible by default (watch console + agent TUI). **No `on` flag.**
 - **`off`** — neither window; monitor log still receives lines. One-shot `agent -p` forwards stay hidden.
 - **`new` and `off`** may appear in either order on the main `.cmd`.
@@ -33,8 +33,8 @@ On **Restricted** ExecutionPolicy, use these `.cmd` wrappers (`-ExecutionPolicy 
 
 ## IRC homes (watch seat only)
 
-- Grok: `%USERPROFILE%\.agentic-irc-watch-grok`
-- Cursor: `%USERPROFILE%\.agentic-irc-watch-cursor`
+- Grok: `%USERPROFILE%\.agentic-irc-watch-grok` then `watch-grok-2` …
+- Cursor: `%USERPROFILE%\.agentic-irc-watch-cursor` then `watch-cursor-2` …
 
 Do not use talk-seat / bobiverse Watch homes (see playbook).
 

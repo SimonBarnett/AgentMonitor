@@ -31,7 +31,7 @@ Watch-AgentHealth.cmd grok
 Watch-AgentHealth.cmd grok off
 ```
 
-- **`new`** — fresh session id.
+- **`new`** — next free slot + fresh session id. Does not restart a live client.
 - **`off`** — hide both windows; log still writes. One-shot `agent -p` forwards stay hidden.
 - One-click `Watch-AgentHealth-*-*.cmd` do not pass `-Windows on`. `-Windows off` only when hidden.
 
@@ -45,7 +45,7 @@ Launch via `cursor-agent.ps1` and a **prompt file** (`launch-cursor-tui.ps1`, `-
 
 If Composer never appears: print-only, no TUI relaunch storm, `create-chat` once per `--new`. Hidden `agent -p` forwards stay available.
 
-When the TUI exits for **any** reason (close, OOM, missing node): write `$IrcHome/agent.quit.request` and `$IrcHome/quit.req`. `irc_agent` PARTs every watch channel then QUITs and does not reconnect on that socket. Only then may a later TUI/agent JOIN again. Watch home only. Never PART talk-seat / bobiverse homes.
+When the TUI exits for **any** reason: write `agent.quit.request` + `quit.req` on **that slot's** watch home. `irc_agent` PARTs then QUITs. Do **not** restart that worker, TUI, or irc_agent (multiple clients share the box; restart ghosts the others). Start a **new** client the same way as talk seats: another `Watch-AgentHealth.cmd cursor new` takes the next free slot (`.agentic-irc-watch-cursor-2`, `-3`, …). Never PART talk-seat / bobiverse homes.
 
 ## `--new` prune
 
@@ -55,11 +55,11 @@ A live `forward-cursor.ps1` counts as busy even without `--resume` on the node c
 
 ## IRC homes (watch only)
 
-- `%USERPROFILE%\.agentic-irc-watch-cursor`
-- `%USERPROFILE%\.agentic-irc-watch-grok`
+- `%USERPROFILE%\.agentic-irc-watch-cursor` (slot 1), `watch-cursor-2` … `-8`
+- `%USERPROFILE%\.agentic-irc-watch-grok` (slot 1), `watch-grok-2` … `-8`
 
 Forbidden: `.agentic-irc-cursor`, `cursor-2`, `.agentic-irc-bobiverse`. No `!bobiverse`. No UAT stamp.
 
-Log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`. State: `~\.grok\agent-health\state-{cursor|grok}.json`.
+Log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log` (slot 2+ uses `Watch-AgentHealth-N.log`). State: `~\.grok\agent-health\state-{cursor|grok}[-N].json`.
 
 Watch-seat agent behaviour: skill `watch-seat`.

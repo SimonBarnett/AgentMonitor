@@ -2,7 +2,7 @@
 
 **Feature request:** [Issue #1](https://github.com/SimonBarnett/AgentMonitor/issues/1). **MRB:** [Issue #3](https://github.com/SimonBarnett/AgentMonitor/issues/3) (Bob chairs). This document does **not** stamp ready for human UAT.
 
-AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It starts a **watch-seat** Grok or Cursor agent, keeps the agent process healthy, and forwards IRC traffic into that session. The agent still owns IRC per `agentic-irc` while the TUI is up. When the TUI exits (any reason), the monitor writes `$IrcHome/agent.quit.request` (and `quit.req` for older agents) so `irc_agent` PARTs every watch channel and QUITs before a later TUI may JOIN again. The monitor does not PART talk-seat / bobiverse homes.
+AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It starts a **watch-seat** Grok or Cursor agent and forwards IRC traffic into that session. The agent still owns IRC per `agentic-irc` while the TUI is up. **Multiple clients can run on one box** (same pattern as talk seats `cursor` / `cursor-2`): each launch binds the next free slot (`.agentic-irc-watch-cursor`, `-2`, …) and does **not** restart or replace a live worker. When the TUI exits (any reason), the monitor writes `$IrcHome/agent.quit.request` (and `quit.req` for older agents) so `irc_agent` PARTs then QUITs **that slot only**. Do not reconnect the same client; start another `Watch-AgentHealth.cmd cursor new` for a new seat. The monitor does not PART talk-seat / bobiverse homes.
 
 ---
 
@@ -14,7 +14,7 @@ AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It s
 | Persist session id; resume without reloading all skills | Monitor (`~\.grok\agent-health\state-{grok\|cursor}.json`) |
 | Connect to IRC (`irc_agent`, `irc_listen` per skill) | Agent |
 | Tail IRC debug log and inject `FROM` lines into the session | Monitor |
-| Health-check / restart crashed agent tree | Monitor |
+| Health-check; on TUI death QUIT that slot (no restart) | Monitor |
 | Start, stop, or health-check `irc_listen` | **Not** the monitor |
 
 The **watch worker** (`-WatchWorker`) runs the monitor loop. Visible by default (no `on` flag): the worker console stays visible and IRC `irc-in` / `forward` lines echo there; the Composer / Grok TUI opens in a normal window. **`-Windows off`** hides the worker and agent TUI; the log file still receives lines. One-shot `agent -p` forwards stay hidden.
@@ -25,8 +25,8 @@ The **watch worker** (`-WatchWorker`) runs the monitor loop. Visible by default 
 
 | Switch | Binary | IRC home default |
 |--------|--------|------------------|
-| `grok` | `agent.exe` | `%USERPROFILE%\.agentic-irc-watch-grok` |
-| `cursor` | `agent.cmd` | `%USERPROFILE%\.agentic-irc-watch-cursor` |
+| `grok` | `agent.exe` | `%USERPROFILE%\.agentic-irc-watch-grok` (then `-2` … `-8`) |
+| `cursor` | `agent.cmd` | `%USERPROFILE%\.agentic-irc-watch-cursor` (then `-2` … `-8`) |
 
 Pass exactly one of `-Grok` / `-Cursor` (or `grok` / `cursor` on the main `.cmd`).
 
@@ -34,8 +34,8 @@ Pass exactly one of `-Grok` / `-Cursor` (or `grok` / `cursor` on the main `.cmd`
 
 ## Resume vs `new`
 
-- **Resume** (default): reuses the stored `sessionId` so the agent resumes the same session and does not reload all skills from scratch.
-- **`new`**: generates a fresh `sessionId`, clears tail offsets, and starts a clean watch session. For Cursor, only leftover nodes from the **previous watch session** and hung `forward-cursor.ps1` / orphan `worker-server` processes are pruned. Fleet `Git task` / `long-running-background-tasks` nodes and other TUIs are left alone. If Composer fails to stay up (OOM / missing node), the watcher switches to print-only and does **not** relaunch a TUI every poll.
+- **Resume** (default): if that slot is free, reuses its stored `sessionId`. If a client is already live, this launch takes the **next free slot** (new home / new nick) instead of restarting the live one.
+- **`new`**: same slot bind, then a fresh `sessionId` on the chosen slot. For Cursor, only leftover nodes from the **previous session of that slot** and hung `forward-cursor.ps1` / orphan `worker-server` processes are pruned. Fleet `Git task` / other TUIs / other watch slots are left alone. If Composer exits, the watcher QUITs that slot and does **not** restart it; start another cmd for another client.
 
 Examples (from repo root):
 
@@ -65,8 +65,8 @@ One-click equivalents (no `-Windows on`; add `-Windows off` for headless):
 
 **LOCKED** — use only the watch IRC homes:
 
-- `%USERPROFILE%\.agentic-irc-watch-grok`
-- `%USERPROFILE%\.agentic-irc-watch-cursor`
+- `%USERPROFILE%\.agentic-irc-watch-grok` (slot 1), `watch-grok-2` … `-8`
+- `%USERPROFILE%\.agentic-irc-watch-cursor` (slot 1), `watch-cursor-2` … `-8`
 
 **Forbidden** (monitor refuses `-IrcHome` pointing here):
 
@@ -117,9 +117,9 @@ The main wrapper passes `-WatchWorker`. Visible launch runs the worker in the co
 
 | Item | Default location |
 |------|------------------|
-| Monitor log | `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log` |
-| Session state | `%USERPROFILE%\.grok\agent-health\state-grok.json` or `state-cursor.json` |
-| Worker pid file | `%USERPROFILE%\.grok\agent-health\watch-worker-{grok\|cursor}.pid` |
+| Monitor log | `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log` (slot 2+ : `Watch-AgentHealth-N.log`) |
+| Session state | `%USERPROFILE%\.grok\agent-health\state-{grok\|cursor}[-N].json` |
+| Worker pid file | `%USERPROFILE%\.grok\agent-health\watch-worker-{grok\|cursor}[-N].pid` |
 
 Override monitor log with `-LogPath` when invoking the script directly (advanced).
 
@@ -141,7 +141,7 @@ Do not commit logs, state files, IRC homes, or secrets.
 ### LOCKED (script header + FR 2026-09-23)
 
 1. `--grok` / `--cursor` switch (`agent.exe` vs `agent.cmd`).
-2. Persist session id; `new` = fresh session.
+2. Persist session id per slot; `new` = next free slot + fresh session. Never restart a live client.
 3. Monitor does not start/stop/health-check `irc_listen`.
 4. Tail `$IrcHome/irc.log`; forward PRIVMSG as `FROM` into the agent session.
 5. Own IRC home only (`.agentic-irc-watch-*`); forbidden homes listed above.

@@ -4,6 +4,7 @@ if "%~1"=="" (
     echo Usage: %~nx0 grok ^| cursor [new] [off]
     echo   resume: %~nx0 cursor
     echo   new:    %~nx0 cursor new
+    echo   extra:  run again while one is live - next free slot, does not restart
     echo   hidden: %~nx0 cursor off
     echo   Visible by default. off hides the watch console and agent TUI.
     exit /b 1
