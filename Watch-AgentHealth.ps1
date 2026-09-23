@@ -31,6 +31,9 @@ param(
 
     [switch]$WatchWorker,
 
+    # Cursor agent --model (e.g. auto). Empty = CLI default. Tray Agents always passes auto.
+    [string]$Model = '',
+
     [ValidateSet('on', 'off')]
     [string]$Windows = 'on',
 
@@ -44,6 +47,19 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:AgentTuiWindowStyle = $(if ($Windows -eq 'on') { 'Normal' } else { 'Hidden' })
+$script:CursorModel = ([string]$Model).Trim()
+
+function Get-CursorModelCliArgs {
+    if (-not $script:CursorModel) { return @() }
+    return @('--model', $script:CursorModel)
+}
+
+function Format-CursorModelCliFragment {
+    # Single-quoted PowerShell fragment for embedded launch scripts.
+    if (-not $script:CursorModel) { return '' }
+    $esc = $script:CursorModel.Replace("'", "''")
+    return " --model '$esc'"
+}
 
 if (-not $Grok -and -not $Cursor) {
     throw 'Pass --grok (agent.exe) or --cursor (agent.cmd).'
@@ -689,10 +705,10 @@ function Send-IrcLineToSession {
         Write-WatchLog ('forward skipped (agent -p already running session={0})' -f $sid)
         return $State
     }
-    $fwdAgent = "& '$escAgent' --trust --force --workspace '$escCwd' -p -- `$prompt"
+    $fwdAgent = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -p -- `$prompt"
     $fwdResume = Test-CursorUseResumeCli -State $State
     if ($fwdResume) {
-        $fwdAgent = "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -p -- `$prompt"
+        $fwdAgent = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd' -p -- `$prompt"
     }
     $body = @(
         '$ErrorActionPreference = ''Stop'''
@@ -822,18 +838,18 @@ function Start-CursorInteractiveTui {
         $escPrompt = $PromptPath.Replace("'", "''")
         $lines += "`$prompt = [IO.File]::ReadAllText('$escPrompt')"
         if ($UseResume) {
-            $lines += "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -- `$prompt"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd' -- `$prompt"
         }
         else {
-            $lines += "& '$escAgent' --trust --force --workspace '$escCwd' -- `$prompt"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -- `$prompt"
         }
     }
     else {
         if ($UseResume) {
-            $lines += "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd'"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd'"
         }
         else {
-            $lines += "& '$escAgent' --trust --force --workspace '$escCwd'"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd'"
         }
     }
     [IO.File]::WriteAllText($launch, ($lines -join [Environment]::NewLine), $utf8)
@@ -874,9 +890,9 @@ function Invoke-CursorAgentPrint {
     $escAgent = $AgentCmd.Replace("'", "''")
     $escSid = $SessionId.Replace("'", "''")
     $escOut = $outLog.Replace("'", "''")
-    $agentLine = "& '$escAgent' --trust --force --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
+    $agentLine = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
     if ($UseResume) {
-        $agentLine = "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
+        $agentLine = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
     }
     $lines = @(
         '$ErrorActionPreference = ''Stop'''
@@ -965,6 +981,9 @@ function Start-WatchedAgent {
             else {
                 $livePid = Start-CursorInteractiveTui -AgentCmd $agentCmd -WorkDir $cwdFull -SessionId $sid -PromptPath $tuiPromptPath -ResumeOnly:$resume -UseResume:$useResumeTui
             }
+            if ($script:CursorModel) {
+                Write-WatchLog ("cursor model=$($script:CursorModel)")
+            }
             if ($livePid -gt 0) {
                 $State = Sync-CursorSessionFromComposer -State $State -ComposerPid $livePid
                 $State.seenSession = $true
@@ -1017,6 +1036,7 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($Grok) { $workerArgs += '-Grok' }
     if ($Cursor) { $workerArgs += '-Cursor' }
     if ($New) { $workerArgs += '-New' }
+    if ($script:CursorModel) { $workerArgs += @('-Model', $script:CursorModel) }
     if ($PSBoundParameters.ContainsKey('Cwd')) { $workerArgs += @('-Cwd', $Cwd) }
     if ($PSBoundParameters.ContainsKey('IrcHome')) { $workerArgs += @('-IrcHome', $IrcHome) }
     if ($PSBoundParameters.ContainsKey('PollSeconds')) { $workerArgs += @('-PollSeconds', [string]$PollSeconds) }
