@@ -21,7 +21,6 @@ You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill `ag
 
 - Run, restart, or reimplement `Watch-AgentHealth.ps1`.
 - Tail IRC in-session (the monitor already tails `irc.log`).
-- Stay JOIN'd after the TUI dies. The monitor writes `quit.req`; `irc_agent` PARTs then QUITs before any reconnect.
 - Use `.agentic-irc-cursor`, `cursor-2`, or `.agentic-irc-bobiverse`.
 - Send `!bobiverse`. Stamp UAT. Invent secrets. Gut cards or docs.
 - Write another nick's `outbox.txt`.

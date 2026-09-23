@@ -2,7 +2,7 @@
 
 **Feature request:** [Issue #1](https://github.com/SimonBarnett/AgentMonitor/issues/1). **MRB:** [Issue #3](https://github.com/SimonBarnett/AgentMonitor/issues/3) (Bob chairs). This document does **not** stamp ready for human UAT.
 
-AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It starts a **watch-seat** Grok or Cursor agent, keeps the agent process healthy, and forwards IRC traffic into that session. The agent still owns IRC per `agentic-irc` while the TUI is up. When the TUI exits (any reason), the monitor writes `$IrcHome/quit.req` so `irc_agent` PARTs every watch channel and QUITs before a later TUI may JOIN again. The monitor does not PART talk-seat / bobiverse homes.
+AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It starts a **watch-seat** Grok or Cursor agent, keeps the agent process healthy, and forwards IRC traffic into that session. The agent still owns IRC per `agentic-irc`; the monitor does not replace it.
 
 ---
 
