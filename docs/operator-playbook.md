@@ -35,7 +35,7 @@ Pass exactly one of `-Grok` / `-Cursor` (or `grok` / `cursor` on the main `.cmd`
 ## Resume vs `new`
 
 - **Resume** (default): reuses the stored `sessionId` so the agent resumes the same session and does not reload all skills from scratch.
-- **`new`**: generates a fresh `sessionId`, clears tail offsets, and starts a clean watch session. For Cursor, stale `cursor-agent` nodes for other sessions may be pruned.
+- **`new`**: generates a fresh `sessionId`, clears tail offsets, and starts a clean watch session. For Cursor, only leftover nodes from the **previous watch session** and hung `forward-cursor.ps1` / orphan `worker-server` processes are pruned. Fleet `Git task` / `long-running-background-tasks` nodes and other TUIs are left alone. If Composer fails to stay up (OOM / missing node), the watcher switches to print-only and does **not** relaunch a TUI every poll.
 
 Examples (from repo root):
 
