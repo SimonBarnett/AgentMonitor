@@ -36,7 +36,7 @@ On **Restricted** ExecutionPolicy, use these `.cmd` wrappers (`-ExecutionPolicy 
 - Grok: `%USERPROFILE%\.agentic-irc-watch-grok` then `watch-grok-2` …
 - Cursor: `%USERPROFILE%\.agentic-irc-watch-cursor` then `watch-cursor-2` …
 
-Do not use talk-seat / bobiverse Watch homes (see playbook).
+Do not use talk-seat / bobiverse Watch homes (see playbook). Each client starts its own `irc_listen` on its home; a shared listener would copy every PRIVMSG into every connected agent.
 
 ## Log (not in git)
 

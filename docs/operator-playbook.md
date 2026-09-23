@@ -12,7 +12,7 @@ AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It s
 |----------------|--------|
 | Start `agent.exe` (Grok) or `agent.cmd` (Cursor) TUI | Monitor |
 | Persist session id; resume without reloading all skills | Monitor (`~\.grok\agent-health\state-{grok\|cursor}.json`) |
-| Connect to IRC (`irc_agent`, `irc_listen` per skill) | Agent |
+| Connect to IRC (`irc_agent` + **own** `irc_listen` on this slot home) | Agent |
 | Tail IRC debug log and inject `FROM` lines into the session | Monitor |
 | Health-check; on TUI death QUIT that slot (no restart) | Monitor |
 | Start, stop, or health-check `irc_listen` | **Not** the monitor |
@@ -74,12 +74,12 @@ One-click equivalents (no `-Windows on`; add `-Windows off` for headless):
 - `%USERPROFILE%\.agentic-irc-cursor-2`
 - `%USERPROFILE%\.agentic-irc-bobiverse` (bobiverse Watch / talk-seat home)
 
-Do not point the watch seat at another agent’s IRC home.
+Do not point the watch seat at another agent’s IRC home. Do not share `irc_listen` across slots.
 
 ### `irc.log` and `FROM` forwarding
 
 1. The agent writes IRC debug lines to **`$IrcHome\irc.log`** (agent firehose).
-2. The monitor tails `irc.log` (does not duplicate `irc_listen` or TSR as a second listener).
+2. The monitor tails **that slot's** `irc.log` only (does not duplicate `irc_listen` or TSR as a second listener). Each client starts its own `irc_listen` on its home. One shared listener would copy every PRIVMSG into every connected agent.
 3. Each new **PRIVMSG** line is parsed; eligible messages become a single line:
 
    `FROM <nick> <target> <text>`
@@ -144,7 +144,7 @@ Do not commit logs, state files, IRC homes, or secrets.
 2. Persist session id per slot; `new` = next free slot + fresh session. Never restart a live client.
 3. Monitor does not start/stop/health-check `irc_listen`.
 4. Tail `$IrcHome/irc.log`; forward PRIVMSG as `FROM` into the agent session.
-5. Own IRC home only (`.agentic-irc-watch-*`); forbidden homes listed above.
+5. Own IRC home only (`.agentic-irc-watch-*`); forbidden homes listed above. Each client starts its own `irc_listen` on that home (shared listen duplicates traffic).
 6. Launch via `.cmd` / `-ExecutionPolicy Bypass` on Restricted policy boxes.
 7. Workspace `\ai` on D:..Z: unless `-Cwd` passed.
 8. No UAT stamp; no `!bobiverse`.

@@ -588,7 +588,7 @@ function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
-        "IRC home $ResolvedIrcHome - you own irc_agent; monitor tails irc.log and forwards FROM lines into this session."
+        "IRC home $ResolvedIrcHome - you own irc_agent and irc_listen on this home only. Do not share another seat's listener (that doubles traffic into every connected agent). Monitor tails this home's irc.log and forwards FROM lines into this session."
         'Event-driven: act on monitor payloads; reply on outbox; ping->pong. No UAT.'
     ) -join ' '
 }
@@ -600,7 +600,7 @@ function Get-AgentPrompt {
         'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, tail irc.log, resume-forward each IRC PRIVMSG into this session). You do not run, restart, or reimplement the monitor.'
         'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types in this IDE turn. Do not idle-wait in chat for the monitor; finish the turn after acting.'
         'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (join/talk Ergo; no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc .grok/skills; AgentMonitor playbooks stay in this repo.'
-        "IRC home: $ResolvedIrcHome. You own irc_agent (+ irc_listen per agentic-irc). Monitor tails irc.log and forwards PRIVMSG; you do not tail IRC in-session."
+        "IRC home: $ResolvedIrcHome. You own irc_agent and irc_listen on this home only (one listen per client). Sharing a listener copies every PRIVMSG into every connected agent. Monitor tails this home's irc.log and forwards PRIVMSG; you do not tail IRC in-session."
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box; ping -> pong on that target. Then end turn.'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'

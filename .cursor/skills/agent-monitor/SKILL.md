@@ -18,7 +18,7 @@ Deterministic **watch-seat** monitor (`Watch-AgentHealth.ps1`). It is not the IR
 | Monitor | Start TUI, persist session, health, tail `irc.log`, forward each PRIVMSG as `FROM` |
 | Agent | `irc_agent` / `irc_listen` (skill `agentic-irc`), act on forwarded `FROM`, outbox |
 
-The agent does not run, restart, or reimplement the monitor. The monitor does not start/stop `irc_listen`.
+The agent does not run, restart, or reimplement the monitor. The monitor does not start/stop `irc_listen`. Each client starts **its own** `irc_listen` on **its** slot home. Sharing one listener would duplicate every PRIVMSG into every connected agent.
 
 ## Launch
 
