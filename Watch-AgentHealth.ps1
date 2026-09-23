@@ -149,6 +149,13 @@ function Get-CursorAgentCmd {
     throw 'cursor agent.cmd not found (%LOCALAPPDATA%\cursor-agent\agent.cmd).'
 }
 
+function Get-CursorAgentPs1 {
+    $cmd = Get-CursorAgentCmd
+    $ps1 = Join-Path ([IO.Path]::GetDirectoryName($cmd)) 'cursor-agent.ps1'
+    if (Test-Path -LiteralPath $ps1) { return (Resolve-Path $ps1).Path }
+    return $cmd
+}
+
 function New-CursorChatSessionId {
     param(
         [string]$AgentCmd,
@@ -668,29 +675,49 @@ function Start-CursorInteractiveTui {
         [switch]$ResumeOnly,
         [switch]$UseResume
     )
-    $argList = New-Object System.Collections.Generic.List[string]
-    foreach ($a in [string[]]@('--trust', '--force', '--workspace', $WorkDir)) {
-        [void]$argList.Add($a)
-    }
-    if ($UseResume) {
-        foreach ($a in [string[]]@('--resume', $SessionId)) {
-            [void]$argList.Add($a)
-        }
-    }
+    $agentPs1 = Get-CursorAgentPs1
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $launch = Join-Path $script:StateDir 'launch-cursor-tui.ps1'
+    $escCwd = $WorkDir.Replace("'", "''")
+    $escAgent = $agentPs1.Replace("'", "''")
+    $escSid = $SessionId.Replace("'", "''")
     $needsPrompt = $true
     if ($ResumeOnly -and $UseResume) { $needsPrompt = $false }
     if ($ResumeOnly -and -not $UseResume) { $needsPrompt = $false }
+    $lines = @(
+        '$ErrorActionPreference = ''Stop'''
+        "Set-Location -LiteralPath '$escCwd'"
+    )
     if ($needsPrompt) {
-        $promptText = [IO.File]::ReadAllText($PromptPath)
-        [void]$argList.Add('--')
-        [void]$argList.Add($promptText)
+        $escPrompt = $PromptPath.Replace("'", "''")
+        $lines += "`$prompt = [IO.File]::ReadAllText('$escPrompt')"
+        if ($UseResume) {
+            $lines += "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -- `$prompt"
+        }
+        else {
+            $lines += "& '$escAgent' --trust --force --workspace '$escCwd' -- `$prompt"
+        }
     }
-    $started = Start-Process -FilePath $AgentCmd -ArgumentList $argList.ToArray() -WorkingDirectory $WorkDir -PassThru -WindowStyle $script:AgentTuiWindowStyle
+    else {
+        if ($UseResume) {
+            $lines += "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd'"
+        }
+        else {
+            $lines += "& '$escAgent' --trust --force --workspace '$escCwd'"
+        }
+    }
+    [IO.File]::WriteAllText($launch, ($lines -join [Environment]::NewLine), $utf8)
+    $psExe = (Get-Command powershell.exe).Source
+    $started = Start-Process -FilePath $psExe -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', $launch
+    ) -WorkingDirectory $WorkDir -PassThru -WindowStyle $script:AgentTuiWindowStyle
     $launcherPid = [int]$started.Id
     Start-Sleep -Seconds 8
     $livePid = Resolve-CursorWatchRootPid -SessionId $SessionId -LauncherPid $launcherPid
     if ($livePid -le 0) {
-        Write-WatchLog ("cursor TUI agent pid=$launcherPid but Composer node missing (OOM or bad session); stopping agent launcher")
+        $head = Get-CommitHeadroomGb
+        $why = if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.5) { 'low commit' } else { 'launcher exited or node never appeared (not cmd.exe prompt-on-argv)' }
+        Write-WatchLog ("cursor TUI agent pid=$launcherPid but Composer node missing ($why); stopping agent launcher")
         Stop-WatchedTree -RootPid $launcherPid
         return 0
     }
