@@ -632,14 +632,18 @@ function Initialize-WatchIrcHome {
 }
 
 function Resolve-AgenticIrcScriptsDir {
+    # Prefer a complete tree (irc_agent imports bob_recycle). Skills copy can lag.
     foreach ($c in @(
-            (Join-Path $env:USERPROFILE '.grok\skills\agentic-irc\scripts'),
             'C:\ai\agentic_irc\scripts',
             'D:\ai\agentic_irc\scripts',
             'E:\ai\agentic_irc\scripts',
-            'C:\src\agentic_irc\scripts'
+            'C:\src\agentic_irc\scripts',
+            (Join-Path $env:USERPROFILE '.grok\skills\agentic-irc\scripts')
         )) {
-        if ($c -and (Test-Path -LiteralPath (Join-Path $c 'irc_agent.py'))) { return $c }
+        if (-not $c) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $c 'irc_agent.py'))) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $c 'bob_recycle.py'))) { continue }
+        return $c
     }
     return $null
 }
