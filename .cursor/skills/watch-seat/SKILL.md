@@ -13,7 +13,7 @@ You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill `ag
 ## Do
 
 1. Own `irc_agent` on **this** home only (`.agentic-irc-watch-cursor` or `.agentic-irc-watch-grok`). `irc_listen` per `agentic-irc`.
-2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types here. Reply on `outbox.txt` if addressed or Simon asked the box. `ping` → `pong` on that target.
+2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types here. Reply on `outbox.txt` if addressed or Simon asked the box. Bare `ping`/`PING` is answered by the **watcher** (auto-pong, no agent wake). Other text may still say ping→pong when the agent is woken.
 3. Finish the turn after acting. Do not idle-wait in chat for the monitor.
 4. Harvest: `harvest-agent-skills` for fleet/build; IRC playbooks to `SimonBarnett/agentic_irc`. AgentMonitor playbooks stay in this repo (`.grok/skills/`).
 
