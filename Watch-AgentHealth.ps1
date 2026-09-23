@@ -367,6 +367,41 @@ function Stop-OrphanCursorWatchForwards {
     return $stopped
 }
 
+function Stop-OrphanWatchPythonForHome {
+    param([string]$ResolvedHome)
+    if (-not $ResolvedHome) { return 0 }
+    $resolved = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
+        Write-WatchLog 'orphan python prune skipped (forbidden home)'
+        return 0
+    }
+    $esc = [regex]::Escape($resolved)
+    $stopped = 0
+    $rows = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            ($cl -match 'irc_listen\.py' -or $cl -match 'irc_agent\.py') -and $cl -match $esc
+        })
+    foreach ($row in $rows) {
+        # Only prune when there is no live watch worker owning this home yet, or process is orphaned
+        # from a prior crash: always safe for *this* home's listen/agent if we are restarting.
+        Write-WatchLog ("prune orphan watch python pid={0}" -f $row.ProcessId)
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+        $stopped++
+    }
+    return $stopped
+}
+
+function Clear-OrphanWatchProcessesOnStart {
+    param([string]$ResolvedHome)
+    $n = 0
+    $n += Stop-OrphanCursorWatchForwards
+    $n += Stop-OrphanWatchPythonForHome -ResolvedHome $ResolvedHome
+    if ($n -gt 0) {
+        Write-WatchLog "watch start pruned $n orphan python/node process(es)"
+    }
+    return $n
+}
+
 function Test-CursorUseResumeCli {
     param($State)
     if ($State.PSObject.Properties.Name -contains 'cursorSessionValid' -and [bool]$State.cursorSessionValid) {
@@ -1085,6 +1120,7 @@ if ($New) {
 }
 
 $state = Initialize-WatchIrcHome -State $state
+[void](Clear-OrphanWatchProcessesOnStart -ResolvedHome ([string]$state.ircHome))
 if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
