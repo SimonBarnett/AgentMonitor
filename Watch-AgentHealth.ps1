@@ -436,8 +436,8 @@ function Initialize-WatchIrcHome {
 
 function Get-WatchIrcAgentRows {
     param([string]$ResolvedHome)
-    $home = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
-    $esc = [regex]::Escape($home)
+    $watchHome = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
+    $esc = [regex]::Escape($watchHome)
     return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
             $cl = [string]$_.CommandLine
             $cl -match 'irc_agent\.py' -and $cl -match $esc
@@ -449,9 +449,9 @@ function Disconnect-WatchIrc {
         $State,
         [string]$Reason = 'tui closed'
     )
-    $home = [string]$State.ircHome
-    if (-not $home) { return }
-    $resolved = [IO.Path]::GetFullPath($home)
+    $watchHome = [string]$State.ircHome
+    if (-not $watchHome) { return }
+    $resolved = [IO.Path]::GetFullPath($watchHome)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         Write-WatchLog "irc disconnect skipped (forbidden home)"
         return
