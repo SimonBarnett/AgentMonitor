@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Start grok agent.exe or Cursor agent.cmd; watch the agent process; forward IRC FROM lines when the agent's listener exists.
 
@@ -10,7 +10,7 @@
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
   Does not stamp UAT. Does not send !bobiverse.
-  The TUI agent does not probe IRC — it acts on monitor FROM only (skill watch-seat).
+  The TUI agent does not probe IRC â€” it acts on monitor FROM only (skill watch-seat).
 
 .EXAMPLE
   Desktop\Watch-AgentHealth.cmd cursor
@@ -102,7 +102,7 @@ $script:StateDir = Join-Path $env:USERPROFILE '.grok\agent-health'
 $script:IrcHomeExplicit = [bool]($PSBoundParameters.ContainsKey('IrcHome') -and $IrcHome)
 $script:ClientSlot = 1
 $script:BoundIrcHome = $null
-# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 …).
+# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 â€¦).
 $script:StatePath = Join-Path $script:StateDir ("state-{0}.json" -f $script:KindName)
 $script:WorkerPidPath = Join-Path $script:StateDir ("watch-worker-{0}.pid" -f $script:KindName)
 if (-not $IrcHome) {
@@ -397,14 +397,14 @@ function Stop-OrphanCursorWatchForwards {
 function Get-LiveWatchWorkerRows {
     param(
         [string]$Kind,
-        [string]$Home,
+        [string]$SeatHome,
         [int]$ExcludePid = 0
     )
     $kindFlag = if ($Kind -eq 'grok') { '-Grok' } else { '-Cursor' }
     $full = $null
     $isDefaultSlot1 = $false
-    if ($Home) {
-        $full = [IO.Path]::GetFullPath($Home).TrimEnd('\')
+    if ($seatHome) {
+        $full = [IO.Path]::GetFullPath($seatHome).TrimEnd('\')
         $base = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}' -f $Kind))).TrimEnd('\')
         $isDefaultSlot1 = ($full -eq $base)
     }
@@ -429,10 +429,10 @@ function Get-LiveWatchWorkerRows {
 
 function Test-WatchHomeInUse {
     param(
-        [string]$Home,
+        [string]$SeatHome,
         [int]$ExcludePid = 0
     )
-    return (@(Get-LiveWatchWorkerRows -Kind $script:KindName -Home $Home -ExcludePid $ExcludePid).Count -gt 0)
+    return (@(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $ExcludePid).Count -gt 0)
 }
 
 function Get-WatchSlotCandidates {
@@ -446,8 +446,8 @@ function Get-WatchSlotCandidates {
 }
 
 function Get-WatchSlotNumberFromHome {
-    param([string]$Home, [string]$Kind)
-    $full = [IO.Path]::GetFullPath($Home).TrimEnd('\')
+    param([string]$SeatHome, [string]$Kind)
+    $full = [IO.Path]::GetFullPath($seatHome).TrimEnd('\')
     $base = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}' -f $Kind))).TrimEnd('\')
     if ($full -eq $base) { return 1 }
     if ($full -match ('^{0}-([0-9]+)$' -f [regex]::Escape($base))) {
@@ -462,7 +462,7 @@ function Resolve-NextFreeWatchIrcHome {
         [int]$ExcludePid = 0
     )
     foreach ($h in @(Get-WatchSlotCandidates -Kind $Kind)) {
-        if (-not (Test-WatchHomeInUse -Home $h -ExcludePid $ExcludePid)) {
+        if (-not (Test-WatchHomeInUse -SeatHome $h -ExcludePid $ExcludePid)) {
             return $h
         }
     }
@@ -480,7 +480,7 @@ function Bind-WatchSlot {
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         throw "Refusing IrcHome $resolved (talk-seat / bobiverse). Use .agentic-irc-watch-*."
     }
-    $slot = Get-WatchSlotNumberFromHome -Home $resolved -Kind $script:KindName
+    $slot = Get-WatchSlotNumberFromHome -SeatHome $resolved -Kind $script:KindName
     $script:ClientSlot = $slot
     $script:BoundIrcHome = $resolved
     $IrcHome = $resolved
@@ -514,7 +514,7 @@ function Stop-OrphanWatchPythonForHome {
         return 0
     }
     # Never kill IRC for a home another live watch worker still owns.
-    $others = @(Get-LiveWatchWorkerRows -Kind $script:KindName -Home $resolved -ExcludePid $PID)
+    $others = @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $resolved -ExcludePid $PID)
     if ($others.Count -gt 0) {
         Write-WatchLog ("orphan python prune skipped - {0} live watch worker(s) own {1}" -f $others.Count, $resolved)
         return 0
@@ -678,9 +678,9 @@ function Ensure-WatchIrcSeat {
     # irc_agent + irc_listen on this home and JOIN all seat channels
     # (#bobiverse, #{machine}, #agentic_irc). Monitor then forwards FROM.
     param($State)
-    $home = [string]$State.ircHome
-    if (-not $home) { return $State }
-    $resolved = [IO.Path]::GetFullPath($home)
+    $seatHome = [string]$State.ircHome
+    if (-not $seatHome) { return $State }
+    $resolved = [IO.Path]::GetFullPath($seatHome)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         Write-WatchLog 'irc ensure skipped (forbidden home)'
         return $State
@@ -834,7 +834,7 @@ function Get-CursorSeedPrompt {
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
         "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (all seat channels)."
-        'You are NOT on IRC by reading irc.log or counting processes — you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
+        'You are NOT on IRC by reading irc.log or counting processes â€” you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
 
@@ -907,7 +907,7 @@ function Test-DropIrcLine {
     param([string]$Line)
     if ($Line -notmatch '^FROM ') { return $true }
     if ($Line -match ' POINT | DIGEST | AGPK | SEAL ') { return $true }
-    # Do NOT drop chat PING here — Send-IrcLineToSession auto-pongs first (CAST IRON).
+    # Do NOT drop chat PING here â€” Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false
 }
@@ -926,11 +926,11 @@ function Get-IrcFromParts {
 function Get-WatchSeatNick {
     param($State)
     if ($State -and $State.ircNick) { return ([string]$State.ircNick).Trim() }
-    $home = $null
-    if ($State -and $State.ircHome) { $home = [string]$State.ircHome }
-    if (-not $home) { $home = [string]$IrcHome }
-    if (-not $home) { return '' }
-    $coord = Join-Path $home 'coordinator.pid'
+    $seatHome = $null
+    if ($State -and $State.ircHome) { $seatHome = [string]$State.ircHome }
+    if (-not $seatHome) { $seatHome = [string]$IrcHome }
+    if (-not $seatHome) { return '' }
+    $coord = Join-Path $seatHome 'coordinator.pid'
     if (Test-Path -LiteralPath $coord) {
         foreach ($line in @(Get-Content -LiteralPath $coord -ErrorAction SilentlyContinue)) {
             if ($line -match '^nick=(.+)$') { return $Matches[1].Trim() }
@@ -944,7 +944,7 @@ function Test-WatchIrcPingText {
         [string]$Text,
         [string]$OurNick = ''
     )
-    # CAST IRON: any ping aimed at this seat (bare or addressed) — watcher pongs, never wakes agent.
+    # CAST IRON: any ping aimed at this seat (bare or addressed) â€” watcher pongs, never wakes agent.
     $t = ([string]$Text).Trim()
     if (-not $t) { return $false }
     if ($t -match '^(?i)ping$') { return $true }
@@ -987,16 +987,16 @@ function Send-IrcLineToSession {
     }
     $trim = $Line.Trim()
     if ($trim -match '^FROM ') {
-        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself — never forward to agent
+        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself â€” never forward to agent
         # (busy seats still answer so fleet knows they are responding).
         $parts = Get-IrcFromParts -Line $trim
         if ($parts) {
             $ourNick = Get-WatchSeatNick -State $State
             if (Test-WatchIrcPingText -Text $parts.text -OurNick $ourNick) {
                 Write-WatchLog ('irc-in (auto-pong, no agent wake) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
-                $home = [string]$State.ircHome
-                if (-not $home) { $home = $IrcHome }
-                [void](Send-WatchIrcPong -IrcHome $home -Target $parts.target -Nick $parts.nick)
+                $seatHome = [string]$State.ircHome
+                if (-not $seatHome) { $seatHome = $IrcHome }
+                [void](Send-WatchIrcPong -IrcHome $seatHome -Target $parts.target -Nick $parts.nick)
                 $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
                 return $State
             }
@@ -1394,11 +1394,11 @@ function Register-WatchWorkerProcess {
     New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
     $self = $PID
     $kindFlag = if ($Cursor) { '-Cursor' } else { '-Grok' }
-    $home = if ($script:BoundIrcHome) { $script:BoundIrcHome } else { [string]$IrcHome }
-    # Only retire stale workers on THIS slot home — never kill seats 2/3/4.
-    foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -Home $home -ExcludePid $self)) {
+    $seatHome = if ($script:BoundIrcHome) { $script:BoundIrcHome } else { [string]$IrcHome }
+    # Only retire stale workers on THIS slot home â€” never kill seats 2/3/4.
+    foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
         $opid = [int]$row.ProcessId
-        Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $home)
+        Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $seatHome)
         Stop-Process -Id $opid -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 400
@@ -1417,7 +1417,7 @@ function Register-WatchWorkerProcess {
         }
     }
     Set-Content -LiteralPath $script:WorkerPidPath -Value ([string]$self) -Encoding ascii -NoNewline
-    Write-WatchLog ("watch worker online pid={0} kind={1} slot={2} home={3}" -f $self, $script:KindName, $script:ClientSlot, $home)
+    Write-WatchLog ("watch worker online pid={0} kind={1} slot={2} home={3}" -f $self, $script:KindName, $script:ClientSlot, $seatHome)
 }
 
 function Unregister-WatchWorkerProcess {
@@ -1440,7 +1440,7 @@ New-Item -ItemType File -Force -Path $script:LogFile | Out-Null
 if (-not $WatchWorker -and $Windows -eq 'on') {
     $WatchWorker = $true
 }
-# Next free .agentic-irc-watch-* / -2 / -3 … before spawning the detached worker.
+# Next free .agentic-irc-watch-* / -2 / -3 â€¦ before spawning the detached worker.
 Bind-WatchSlot
 Start-DetachedWatchWorkerIfNeeded
 $state = Read-WatchState
