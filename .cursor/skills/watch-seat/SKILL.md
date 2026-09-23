@@ -11,6 +11,13 @@ description: >
 You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill
 `agent-monitor` is the monitor contract.
 
+## CAST IRON — watcher auto-pong (Simon 2026-09-23)
+
+The **monitor** (not you) answers every seat-directed `ping` / `PING`
+(bare or `nick: ping`) with `PRIVMSG … :nick: pong` on this home's
+`outbox.txt`. It does **not** forward that line into the TUI — so a busy
+agent still looks alive. Do not also pong from the agent for bare ping.
+
 ## CAST IRON — IRC arrives from the watcher (Simon 2026-09-23)
 
 You are **not** "on IRC" by reading `irc.log`, counting `irc_agent` /
@@ -32,8 +39,9 @@ on this home and JOINed **all seat channels** (`#bobiverse`, `#{machine}`,
    another seat's listener. Opening another tray Agents click takes the next
    free slot — it must not kill this seat.
 2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types
-   here. Reply on `outbox.txt` if addressed or Simon asked the box. Bare
-   `ping`/`PING` is answered by the **watcher** (auto-pong, no agent wake).
+   here. Reply on `outbox.txt` if addressed or Simon asked the box. Bare /
+   addressed `ping`/`PING` is answered by the **watcher** (auto-pong, no
+   agent wake) — even when you are busy.
 3. Finish the turn after acting. Do not idle-wait in chat for the monitor.
 4. Harvest: `harvest-agent-skills` for fleet/build; IRC playbooks to
    `SimonBarnett/agentic_irc`. AgentMonitor playbooks stay in this repo

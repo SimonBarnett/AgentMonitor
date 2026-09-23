@@ -26,6 +26,11 @@ IRC** (ensure after orphan prune). If agent or listen dies while the seat is
 live, the monitor re-ensures. On TUI exit the monitor writes `quit.req` so
 `irc_agent` PARTs every watch channel then QUITs.
 
+**CAST IRON — PING:** the watcher **always** auto-pongs seat-directed
+`ping`/`PING` (bare or addressed to this nick) on `outbox.txt` and **never**
+forwards that line to the agent. Busy seats still answer so the fleet knows
+they are responding.
+
 ## Launch
 
 Visible by default (watch console + agent TUI). There is **no `on` flag**.

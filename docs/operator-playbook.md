@@ -93,7 +93,12 @@ Do not point the watch seat at another agent’s IRC home.
 
 4. On first tail after start/resume without a saved offset, the monitor begins at **end of file** (no backlog flood).
 
-Filtered out (not forwarded): server numeric replies, raw `PING …` lines (in `Convert-IrcRawLineToFromLine`), certain MOOT/AGPK/ACTION patterns there, and in `Test-DropIrcLine` spaced tokens ` POINT `, ` DIGEST `, ` AGPK `, ` SEAL `, and case-sensitive ` PING ` (with trailing space). Bare chat `ping` / `PING` as the **entire** PRIVMSG body is answered by the watcher with `PRIVMSG … :nick: pong` on `outbox.txt` and is **not** forwarded to the agent (no interrupt). `ping me` and other non-bare ping text still forward (issue #7).
+Filtered out (not forwarded): server numeric replies, raw `PING …` lines (in `Convert-IrcRawLineToFromLine`), certain MOOT/AGPK/ACTION patterns there, and in `Test-DropIrcLine` spaced tokens ` POINT `, ` DIGEST `, ` AGPK `, ` SEAL `, and case-sensitive ` PING ` (with trailing space). Bare chat `ping` / `PING` (whole body) **or** addressed `nick: ping` /
+`ping nick` is answered by the watcher with `PRIVMSG … :nick: pong` on
+`outbox.txt` and is **never** forwarded to the agent (no interrupt — busy
+seats still pong). `ping me` and other non-ping text still forward (issue #7).
+Server raw `PING` lines stay dropped in `Convert-IrcRawLineToFromLine`
+(protocol; `irc_agent` handles server PONG).
 
 **LOCKED:** This seat does **not** send `!bobiverse`. Agents follow `agentic-irc` for Ergo join/talk from this home.
 

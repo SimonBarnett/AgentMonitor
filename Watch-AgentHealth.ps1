@@ -907,8 +907,7 @@ function Test-DropIrcLine {
     param([string]$Line)
     if ($Line -notmatch '^FROM ') { return $true }
     if ($Line -match ' POINT | DIGEST | AGPK | SEAL ') { return $true }
-    # Spaced token only (keeps "ping me" forwarding — issue #7). Bare EOL PING handled in Send-IrcLineToSession.
-    if ($Line -cmatch ' PING ') { return $true }
+    # Do NOT drop chat PING here — Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false
 }
@@ -924,10 +923,41 @@ function Get-IrcFromParts {
     }
 }
 
-function Test-BareIrcPingText {
-    param([string]$Text)
-    # Whole PRIVMSG body is ping/PING only (optional surrounding whitespace already trimmed).
-    return [bool]($Text -match '^(?i)ping$')
+function Get-WatchSeatNick {
+    param($State)
+    if ($State -and $State.ircNick) { return ([string]$State.ircNick).Trim() }
+    $home = $null
+    if ($State -and $State.ircHome) { $home = [string]$State.ircHome }
+    if (-not $home) { $home = [string]$IrcHome }
+    if (-not $home) { return '' }
+    $coord = Join-Path $home 'coordinator.pid'
+    if (Test-Path -LiteralPath $coord) {
+        foreach ($line in @(Get-Content -LiteralPath $coord -ErrorAction SilentlyContinue)) {
+            if ($line -match '^nick=(.+)$') { return $Matches[1].Trim() }
+        }
+    }
+    return ''
+}
+
+function Test-WatchIrcPingText {
+    param(
+        [string]$Text,
+        [string]$OurNick = ''
+    )
+    # CAST IRON: any ping aimed at this seat (bare or addressed) — watcher pongs, never wakes agent.
+    $t = ([string]$Text).Trim()
+    if (-not $t) { return $false }
+    if ($t -match '^(?i)ping$') { return $true }
+    if ($OurNick) {
+        $esc = [regex]::Escape($OurNick)
+        if ($t -match ("^(?i)@?{0}\s*[:,-]?\s*ping\s*$" -f $esc)) { return $true }
+        if ($t -match ("^(?i)ping\s+@?{0}\s*$" -f $esc)) { return $true }
+    }
+    # "nick: PING" with extra trailing junk stripped already; also CTCP-less "PING nick"
+    if ($t -match '^(?i)ping\b' -and $OurNick -and $t.ToLowerInvariant().Contains($OurNick.ToLowerInvariant())) {
+        return $true
+    }
+    return $false
 }
 
 function Send-WatchIrcPong {
@@ -937,11 +967,12 @@ function Send-WatchIrcPong {
         [string]$Nick
     )
     if (-not $IrcHome -or -not $Target) { return $false }
+    New-Item -ItemType Directory -Force -Path $IrcHome | Out-Null
     $outbox = Join-Path $IrcHome 'outbox.txt'
     $who = if ($Nick) { '{0}: pong' -f $Nick } else { 'pong' }
     $line = 'PRIVMSG {0} :{1}' -f $Target, $who
     [IO.File]::AppendAllText($outbox, $line + "`n", (New-Object System.Text.UTF8Encoding $false))
-    Write-WatchLog ('auto-pong {0} -> {1}' -f $Nick, $Target)
+    Write-WatchLog ('auto-pong {0} -> {1} (watcher; no agent wake)' -f $Nick, $Target)
     return $true
 }
 
@@ -956,17 +987,22 @@ function Send-IrcLineToSession {
     }
     $trim = $Line.Trim()
     if ($trim -match '^FROM ') {
+        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself — never forward to agent
+        # (busy seats still answer so fleet knows they are responding).
+        $parts = Get-IrcFromParts -Line $trim
+        if ($parts) {
+            $ourNick = Get-WatchSeatNick -State $State
+            if (Test-WatchIrcPingText -Text $parts.text -OurNick $ourNick) {
+                Write-WatchLog ('irc-in (auto-pong, no agent wake) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
+                $home = [string]$State.ircHome
+                if (-not $home) { $home = $IrcHome }
+                [void](Send-WatchIrcPong -IrcHome $home -Target $parts.target -Nick $parts.nick)
+                $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+                return $State
+            }
+        }
         if (Test-DropIrcLine -Line $trim) {
             Write-WatchLog ('irc-in (filtered) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
-            return $State
-        }
-        $parts = Get-IrcFromParts -Line $trim
-        if ($parts -and (Test-BareIrcPingText -Text $parts.text)) {
-            Write-WatchLog ('irc-in (auto-pong, no agent wake) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
-            $home = [string]$State.ircHome
-            if (-not $home) { $home = $IrcHome }
-            [void](Send-WatchIrcPong -IrcHome $home -Target $parts.target -Nick $parts.nick)
-            $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
             return $State
         }
         Write-WatchLog ('irc-in {0}' -f $trim.Substring(0, [Math]::Min(350, $trim.Length)))
