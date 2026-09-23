@@ -450,7 +450,8 @@ function Stop-WatchedTree {
 function Test-DropIrcLine {
     param([string]$Line)
     if ($Line -notmatch '^FROM ') { return $true }
-    if ($Line -match ' POINT | DIGEST | AGPK | SEAL | PING ') { return $true }
+    if ($Line -match ' POINT | DIGEST | AGPK | SEAL ') { return $true }
+    if ($Line -cmatch ' PING ') { return $true }
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false
 }
