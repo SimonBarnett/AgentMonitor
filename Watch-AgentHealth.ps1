@@ -115,11 +115,15 @@ function Test-WatchSlotLive {
             return $true
         }
     }
-    $home = [IO.Path]::GetFullPath($paths.IrcHome).TrimEnd('\')
-    $esc = [regex]::Escape($home)
+    $watchHome = [IO.Path]::GetFullPath($paths.IrcHome).TrimEnd('\')
     $irc = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
             $cl = [string]$_.CommandLine
-            $cl -match 'irc_agent\.py' -and $cl -match $esc
+            if ($cl -notmatch 'irc_agent\.py') { return $false }
+            $idx = $cl.IndexOf($watchHome, [StringComparison]::OrdinalIgnoreCase)
+            if ($idx -lt 0) { return $false }
+            $end = $idx + $watchHome.Length
+            if ($end -ge $cl.Length) { return $true }
+            return ($cl[$end] -match '[\s\\/"]')
         })
     return ($irc.Count -gt 0)
 }
@@ -516,11 +520,15 @@ function Initialize-WatchIrcHome {
 
 function Get-WatchIrcAgentRows {
     param([string]$ResolvedHome)
-    $home = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
-    $esc = [regex]::Escape($home)
+    $watchHome = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
     return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
             $cl = [string]$_.CommandLine
-            $cl -match 'irc_agent\.py' -and $cl -match $esc
+            if ($cl -notmatch 'irc_agent\.py') { return $false }
+            $idx = $cl.IndexOf($watchHome, [StringComparison]::OrdinalIgnoreCase)
+            if ($idx -lt 0) { return $false }
+            $end = $idx + $watchHome.Length
+            if ($end -ge $cl.Length) { return $true }
+            return ($cl[$end] -match '[\s\\/"]')
         })
 }
 
@@ -529,9 +537,9 @@ function Disconnect-WatchIrc {
         $State,
         [string]$Reason = 'tui closed'
     )
-    $home = [string]$State.ircHome
-    if (-not $home) { return }
-    $resolved = [IO.Path]::GetFullPath($home)
+    $watchHome = [string]$State.ircHome
+    if (-not $watchHome) { return }
+    $resolved = [IO.Path]::GetFullPath($watchHome)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         Write-WatchLog "irc disconnect skipped (forbidden home)"
         return
