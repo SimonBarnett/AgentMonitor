@@ -17,7 +17,8 @@
   Desktop\Watch-AgentHealth.cmd grok new
 
   Direct .\Watch-AgentHealth.ps1 fails when execution policy is Restricted; use .cmd or -ExecutionPolicy Bypass.
-  Monitor runs hidden (-WatchWorker). Opens Cursor Composer / grok agent TUI directly (no PowerShell launcher for the TUI).
+  -Windows on (default): visible watch console (-WatchWorker in this window) and visible agent TUI.
+  -Windows off: hidden watch worker and hidden agent TUI; log file still receives lines. One-shot agent -p forwards stay hidden in both modes.
 #>
 [CmdletBinding(DefaultParameterSetName = 'none')]
 param(
@@ -31,6 +32,9 @@ param(
 
     [switch]$WatchWorker,
 
+    [ValidateSet('on', 'off')]
+    [string]$Windows = 'on',
+
     [string]$Cwd,
     [string]$IrcHome,
     [int]$PollSeconds = 15,
@@ -39,6 +43,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+$script:AgentTuiWindowStyle = $(if ($Windows -eq 'on') { 'Normal' } else { 'Hidden' })
 
 if (-not $Grok -and -not $Cursor) {
     throw 'Pass --grok (agent.exe) or --cursor (agent.cmd).'
@@ -637,7 +643,7 @@ function Start-CursorInteractiveTui {
         [void]$argList.Add('--')
         [void]$argList.Add($promptText)
     }
-    $started = Start-Process -FilePath $AgentCmd -ArgumentList $argList.ToArray() -WorkingDirectory $WorkDir -PassThru -WindowStyle Normal
+    $started = Start-Process -FilePath $AgentCmd -ArgumentList $argList.ToArray() -WorkingDirectory $WorkDir -PassThru -WindowStyle $script:AgentTuiWindowStyle
     $launcherPid = [int]$started.Id
     Start-Sleep -Seconds 8
     $livePid = Resolve-CursorWatchRootPid -SessionId $SessionId -LauncherPid $launcherPid
@@ -738,10 +744,10 @@ function Start-WatchedAgent {
                 $seedFile = Join-Path $script:StateDir 'cursor-tui-seed.prompt.txt'
                 [IO.File]::WriteAllText($seedFile, (Get-CursorSeedPrompt -ResolvedIrcHome $resolvedHome), $utf8)
                 $tuiPromptPath = $seedFile
-                Write-WatchLog 'cursor New: visible Composer TUI (short seed); IRC forwards stay hidden agent -p'
+                Write-WatchLog "cursor New: Composer TUI window=$($script:AgentTuiWindowStyle) (short seed); IRC forwards stay hidden agent -p"
             }
             else {
-                Write-WatchLog 'cursor Resume: visible Composer TUI (resume attach)'
+                Write-WatchLog "cursor Resume: Composer TUI window=$($script:AgentTuiWindowStyle) (resume attach)"
             }
             $head = Get-CommitHeadroomGb
             if ($head.FreeGb -ge 0 -and $head.FreeGb -lt 0.5) {
@@ -780,7 +786,7 @@ function Start-WatchedAgent {
             $argList += @('-s', [string]$State.sessionId, '--rules', (Get-GrokRules))
         }
         $argList += $prompt
-        $started = Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory $cwdFull -PassThru -WindowStyle Normal
+        $started = Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory $cwdFull -PassThru -WindowStyle $script:AgentTuiWindowStyle
         $State.seenSession = $true
         $State.rootPid = [int]$started.Id
         return [pscustomobject]@{ Kind = 'grok'; Exe = $exe; Process = $started; RootPid = [int]$started.Id; State = $State }
@@ -796,7 +802,8 @@ function Start-DetachedWatchWorkerIfNeeded {
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-WindowStyle', 'Hidden',
         '-File', $sp,
-        '-WatchWorker'
+        '-WatchWorker',
+        '-Windows', 'off'
     )
     if ($Grok) { $workerArgs += '-Grok' }
     if ($Cursor) { $workerArgs += '-Cursor' }
@@ -812,7 +819,7 @@ function Start-DetachedWatchWorkerIfNeeded {
     }
     New-Item -ItemType File -Force -Path $log | Out-Null
     $proc = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList $workerArgs -WindowStyle Hidden -PassThru
-    $boot = '{0:o} hidden watch monitor pid={1} (opens agent TUI; log={2})' -f [datetime]::UtcNow, $proc.Id, $log
+    $boot = '{0:o} hidden watch monitor pid={1} (-Windows off; log={2})' -f [datetime]::UtcNow, $proc.Id, $log
     Add-Content -LiteralPath $log -Value $boot -Encoding utf8
     Write-Host $boot
     exit 0
@@ -869,6 +876,9 @@ if (-not $script:LogFile) {
 }
 
 New-Item -ItemType File -Force -Path $script:LogFile | Out-Null
+if (-not $WatchWorker -and $Windows -eq 'on') {
+    $WatchWorker = $true
+}
 Start-DetachedWatchWorkerIfNeeded
 $state = Read-WatchState
 if (-not $state) {
@@ -900,7 +910,7 @@ if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
 $state = Initialize-IrcLogTail -State $state
-Write-WatchLog "watch start kind=$($script:KindName) cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
+Write-WatchLog "watch start kind=$($script:KindName) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
 
 $current = $null
 try {
@@ -946,7 +956,7 @@ try {
             Write-WatchState -Obj $state
             Write-WatchLog "started kind=$($started.Kind) exe=$($started.Exe) rootPid=$($started.RootPid) session=$($state.sessionId) firstRun=$firstRun"
             if ($Cursor) {
-                Write-WatchLog 'cursor seat: visible Composer TUI; IRC wakes use hidden agent -p'
+                Write-WatchLog "cursor seat: Composer TUI window=$($script:AgentTuiWindowStyle); IRC wakes use hidden agent -p"
             }
         }
 
