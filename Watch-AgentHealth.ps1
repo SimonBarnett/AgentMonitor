@@ -17,8 +17,7 @@
   Desktop\Watch-AgentHealth.cmd grok new
 
   Direct .\Watch-AgentHealth.ps1 fails when execution policy is Restricted; use .cmd or -ExecutionPolicy Bypass.
-  -Windows on (default): visible watch console (-WatchWorker in this window) and visible agent TUI.
-  -Windows off: hidden watch worker and hidden agent TUI; log file still receives lines. One-shot agent -p forwards stay hidden in both modes.
+  Visible by default (no on flag). -Windows off: hidden watch worker and hidden agent TUI; log file still receives lines. One-shot agent -p forwards stay hidden.
 #>
 [CmdletBinding(DefaultParameterSetName = 'none')]
 param(
@@ -435,10 +434,58 @@ function Initialize-WatchIrcHome {
     return $State
 }
 
+function Get-WatchIrcAgentRows {
+    param([string]$ResolvedHome)
+    $home = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
+    $esc = [regex]::Escape($home)
+    return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_agent\.py' -and $cl -match $esc
+        })
+}
+
+function Disconnect-WatchIrc {
+    param(
+        $State,
+        [string]$Reason = 'tui closed'
+    )
+    $home = [string]$State.ircHome
+    if (-not $home) { return }
+    $resolved = [IO.Path]::GetFullPath($home)
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
+        Write-WatchLog "irc disconnect skipped (forbidden home)"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $why = ([string]$Reason).Replace("`r", ' ').Replace("`n", ' ').Trim()
+    if (-not $why) { $why = 'tui closed' }
+    if ($why.Length -gt 80) { $why = $why.Substring(0, 80) }
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::WriteAllText((Join-Path $resolved 'quit.req'), $why, $utf8)
+    Write-WatchLog ("irc graceful PART+QUIT requested ({0}) home={1}" -f $why, $resolved)
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline) {
+        if ((Get-WatchIrcAgentRows -ResolvedHome $resolved).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 400
+    }
+    $left = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    foreach ($row in $left) {
+        Write-WatchLog ("irc agent still up after QUIT wait pid={0} - stopping" -f $row.ProcessId)
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $listen = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_listen\.py' -and $cl -match [regex]::Escape($resolved)
+        })
+    foreach ($row in $listen) {
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     return @(
-        'Watch seat online. Skills: agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
+        'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
         "IRC home $ResolvedIrcHome - you own irc_agent; monitor tails irc.log and forwards FROM lines into this session."
         'Event-driven: act on monitor payloads; reply on outbox; ping->pong. No UAT.'
     ) -join ' '
@@ -450,7 +497,7 @@ function Get-AgentPrompt {
         'You are a fleet agent on this Windows box (watch seat).'
         'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, tail irc.log, resume-forward each IRC PRIVMSG into this session). You do not run, restart, or reimplement the monitor.'
         'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types in this IDE turn. Do not idle-wait in chat for the monitor; finish the turn after acting.'
-        'Follow skills: agentic-irc (join/talk Ergo; no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc .grok/skills.'
+        'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (join/talk Ergo; no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc .grok/skills; AgentMonitor playbooks stay in this repo.'
         "IRC home: $ResolvedIrcHome. You own irc_agent (+ irc_listen per agentic-irc). Monitor tails irc.log and forwards PRIVMSG; you do not tail IRC in-session."
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box; ping -> pong on that target. Then end turn.'
@@ -460,7 +507,7 @@ function Get-AgentPrompt {
 
 function Get-GrokRules {
     $skills = Join-Path $env:USERPROFILE '.grok\skills'
-    return "Skills live at $skills. Follow agentic-irc and agentic_build (including harvest-agent-skills). CAST IRON harvest back to the owning repo."
+    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc."
 }
 
 function Get-DescendantPids {
@@ -1021,6 +1068,7 @@ try {
                 $livePid = Resolve-CursorWatchRootPid -SessionId ([string]$state.sessionId) -LauncherPid $current.RootPid
                 if ($livePid -le 0) {
                     Write-WatchLog "cursor Composer not running session=$($state.sessionId) - print-only (no TUI relaunch)"
+                    Disconnect-WatchIrc -State $state -Reason 'tui closed'
                     if ($current.RootPid -gt 0) {
                         Stop-WatchedTree -RootPid $current.RootPid
                     }
@@ -1038,6 +1086,7 @@ try {
         }
         elseif (-not (Test-TreeHealthy -RootPid $current.RootPid)) {
             Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - restart (resume session $($state.sessionId))"
+            Disconnect-WatchIrc -State $state -Reason 'tui closed'
             Stop-WatchedTree -RootPid $current.RootPid
             $needStart = $true
             Start-Sleep -Seconds $CrashBackoffSeconds
@@ -1076,6 +1125,9 @@ catch {
     Write-WatchLog ("watch fatal: $($_.Exception.Message)")
 }
 finally {
+    if ($state) {
+        Disconnect-WatchIrc -State $state -Reason 'watch stop'
+    }
     if ($WatchWorker) {
         Unregister-WatchWorkerProcess
     }

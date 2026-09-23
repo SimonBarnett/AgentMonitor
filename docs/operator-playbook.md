@@ -2,7 +2,7 @@
 
 **Feature request:** [Issue #1](https://github.com/SimonBarnett/AgentMonitor/issues/1). **MRB:** [Issue #3](https://github.com/SimonBarnett/AgentMonitor/issues/3) (Bob chairs). This document does **not** stamp ready for human UAT.
 
-AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It starts a **watch-seat** Grok or Cursor agent, keeps the agent process healthy, and forwards IRC traffic into that session. The agent still owns IRC per `agentic-irc`; the monitor does not replace it.
+AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It starts a **watch-seat** Grok or Cursor agent, keeps the agent process healthy, and forwards IRC traffic into that session. The agent still owns IRC per `agentic-irc` while the TUI is up. When the TUI exits (any reason), the monitor writes `$IrcHome/quit.req` so `irc_agent` PARTs every watch channel and QUITs before a later TUI may JOIN again. The monitor does not PART talk-seat / bobiverse homes.
 
 ---
 
@@ -17,7 +17,7 @@ AgentMonitor is `Watch-AgentHealth.ps1` plus `.cmd` launchers in this repo. It s
 | Health-check / restart crashed agent tree | Monitor |
 | Start, stop, or health-check `irc_listen` | **Not** the monitor |
 
-The **watch worker** (`-WatchWorker`) runs the monitor loop. With **`-Windows on`** (default), the worker console stays visible and IRC `irc-in` / `forward` lines echo there; the Composer / Grok TUI opens in a normal window. With **`-Windows off`**, the worker and agent TUI are hidden; the log file still receives lines. One-shot `agent -p` forwards stay hidden in both modes.
+The **watch worker** (`-WatchWorker`) runs the monitor loop. Visible by default (no `on` flag): the worker console stays visible and IRC `irc-in` / `forward` lines echo there; the Composer / Grok TUI opens in a normal window. **`-Windows off`** hides the worker and agent TUI; the log file still receives lines. One-shot `agent -p` forwards stay hidden.
 
 ---
 
@@ -48,9 +48,9 @@ Watch-AgentHealth.cmd grok off
 Watch-AgentHealth.cmd cursor new off
 ```
 
-`on` (default) and `off` control whether the watch console and agent TUI are shown; `new` and `on`/`off` may be in either order.
+Visible by default. **No `on` flag.** `off` hides the watch console and agent TUI. `new` and `off` may be in either order.
 
-One-click equivalents (each passes **`-Windows on`**; edit to `off` for headless):
+One-click equivalents (no `-Windows on`; add `-Windows off` for headless):
 
 | File | Effect |
 |------|--------|
@@ -109,7 +109,7 @@ Use:
 - Any `Watch-AgentHealth*.cmd` in this repo (they call `powershell.exe -NoProfile -ExecutionPolicy Bypass`), or
 - An equivalent manual invoke with `-ExecutionPolicy Bypass`.
 
-The main wrapper passes `-WatchWorker`. **`-Windows on`** runs the worker in the visible console (`-NoExit` so startup errors stay on screen). **`-Windows off`** starts a hidden worker (`-WindowStyle Hidden`).
+The main wrapper passes `-WatchWorker`. Visible launch runs the worker in the console (`-NoExit` so startup errors stay on screen). **`-Windows off`** starts a hidden worker (`-WindowStyle Hidden`).
 
 ---
 
@@ -148,7 +148,7 @@ Do not commit logs, state files, IRC homes, or secrets.
 6. Launch via `.cmd` / `-ExecutionPolicy Bypass` on Restricted policy boxes.
 7. Workspace `\ai` on D:..Z: unless `-Cwd` passed.
 8. No UAT stamp; no `!bobiverse`.
-9. `-Windows on|off` (default `on`): visible watch console + visible agent TUI, or both hidden; one-shot `agent -p` forwards stay hidden.
+9. Visible by default (no `on` flag). `-Windows off` hides both windows; one-shot `agent -p` forwards stay hidden.
 
 ### UNKNOWN
 
@@ -165,6 +165,8 @@ For operators who invoke `Watch-AgentHealth.ps1` with Bypass (not typical day-to
 - `-Cwd` — explicit workspace.
 - `-PollSeconds` (default 15), `-CrashBackoffSeconds` (default 20).
 - `-LogPath` — alternate monitor log file.
-- `-Windows on|off` (default `on`) — show both terminals or neither.
+- `-Windows off` — hide both terminals (default is visible).
 
-Entry via `.cmd` always includes `-WatchWorker`. With `-Windows off`, the outer `.cmd` spawns a hidden worker and exits; with `on`, the worker runs in the visible console.
+Entry via `.cmd` always includes `-WatchWorker`. With `off`, the outer `.cmd` spawns a hidden worker and exits; otherwise the worker runs in the visible console.
+
+**Skills** (what the monitor vs watch-seat agent do): `.grok/skills/agent-monitor/SKILL.md`, `.grok/skills/watch-seat/SKILL.md`.
