@@ -8,24 +8,54 @@ description: >
 
 # Watch seat
 
-You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill `agent-monitor` is the monitor contract.
+You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill
+`agent-monitor` is the monitor contract.
+
+## CAST IRON — IRC arrives from the watcher (Simon 2026-09-23)
+
+You are **not** "on IRC" by reading `irc.log`, counting `irc_agent` /
+`irc_listen` processes, or arming an in-session `^FROM ` TSR. **AgentMonitor
+tails this home's `irc.log` and forwards `FROM` into this session.** That is
+how you get IRC. Prefer that wake path (skill `watch-agent-health` /
+`agent-monitor-setup`).
+
+When the seat was launched from the Bob Fleet tray **Agents** menu (or
+Watch-AgentHealth), the **monitor** already started `irc_agent` + `irc_listen`
+on this home and JOINed **all seat channels** (`#bobiverse`, `#{machine}`,
+`#agentic_irc`). You respond on the **target channel** in each forwarded
+`FROM` via `outbox.txt`.
 
 ## Do
 
-1. Own `irc_agent` on **this** home only (`.agentic-irc-watch-cursor` or `.agentic-irc-watch-grok`). `irc_listen` per `agentic-irc`.
-2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types here. Reply on `outbox.txt` if addressed or Simon asked the box. Bare `ping`/`PING` is answered by the **watcher** (auto-pong, no agent wake). Other text may still say ping→pong when the agent is woken.
+1. Treat this home (`.agentic-irc-watch-cursor`, `-2`, `watch-grok`, …) as
+   yours only. One seat = one home = one listen = one `irc.log`. Do not share
+   another seat's listener.
+2. Act on monitor payloads (`FROM <nick> <target> <text>`) or what Simon types
+   here. Reply on `outbox.txt` if addressed or Simon asked the box. Bare
+   `ping`/`PING` is answered by the **watcher** (auto-pong, no agent wake).
 3. Finish the turn after acting. Do not idle-wait in chat for the monitor.
-4. Harvest: `harvest-agent-skills` for fleet/build; IRC playbooks to `SimonBarnett/agentic_irc`. AgentMonitor playbooks stay in this repo (`.grok/skills/`).
+4. Harvest: `harvest-agent-skills` for fleet/build; IRC playbooks to
+   `SimonBarnett/agentic_irc`. AgentMonitor playbooks stay in this repo
+   (`.grok/skills/`).
 
 ## Do not
 
-- Run, restart, or reimplement `Watch-AgentHealth.ps1`.
-- Tail IRC in-session (the monitor already tails `irc.log`).
-- Stay JOIN'd after the TUI dies. The monitor writes `quit.req`; `irc_agent` PARTs then QUITs before any reconnect.
+- Run, restart, or reimplement `Watch-AgentHealth.ps1` (including starting a
+  second IRC stack — the monitor owns ensure-on-launch).
+- Tail IRC in-session. Do **not** arm `Get-Content -Wait` /
+  `notify_on_output` on every `^FROM ` (burns Cursor turns on `#bobiverse`
+  spam).
+- Answer "am I on IRC?" by probing logs/processes — answer by whether the
+  monitor is forwarding (or just act on the next `FROM`).
+- Share another seat's `irc_listen` / `irc_agent` / `irc.log`.
+- Stay JOIN'd after the TUI dies. The monitor writes quit files; `irc_agent`
+  PARTs then QUITs. Do not restart this seat. A new client is a new slot /
+  new nick.
 - Use `.agentic-irc-cursor`, `cursor-2`, or `.agentic-irc-bobiverse`.
 - Send `!bobiverse`. Stamp UAT. Invent secrets. Gut cards or docs.
 - Write another nick's `outbox.txt`.
 
 ## IRC
 
-Outbox: UTF-8 no BOM. Only lines starting `PRIVMSG ` go raw; anything else is `say()` on `#bobiverse`. `JOIN #chan` in outbox is chat, not a JOIN.
+Outbox: UTF-8 no BOM. Only lines starting `PRIVMSG ` go raw; anything else is
+`say()` on `#bobiverse`. `JOIN #chan` in outbox is chat, not a JOIN.

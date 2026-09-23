@@ -4,11 +4,13 @@
 
 .DESCRIPTION
   Simon #bobiverse 2026-09-22: --grok / --cursor. Persist session id (resume, no full skill reload).
-  Does not start, stop, or health-check irc_listen — the agent connects to IRC per agentic-irc.
-  Monitor tails $IrcHome/irc.log (agent debug firehose) and resume-forwards each PRIVMSG as FROM into the agent.
+  CAST IRON (Simon 2026-09-23): Ensure-WatchIrcSeat starts irc_agent + irc_listen on the watch
+  home and JOINs #bobiverse, #{machine}, #agentic_irc (systray Agents / every launch).
+  Monitor tails $IrcHome/irc.log and forwards each PRIVMSG as FROM into the agent.
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
   Does not stamp UAT. Does not send !bobiverse.
+  The TUI agent does not probe IRC — it acts on monitor FROM only (skill watch-seat).
 
 .EXAMPLE
   Desktop\Watch-AgentHealth.cmd cursor
@@ -485,6 +487,147 @@ function Initialize-WatchIrcHome {
     return $State
 }
 
+function Resolve-AgenticIrcScriptsDir {
+    foreach ($c in @(
+            (Join-Path $env:USERPROFILE '.grok\skills\agentic-irc\scripts'),
+            'C:\ai\agentic_irc\scripts',
+            'D:\ai\agentic_irc\scripts',
+            'E:\ai\agentic_irc\scripts',
+            'C:\src\agentic_irc\scripts'
+        )) {
+        if ($c -and (Test-Path -LiteralPath (Join-Path $c 'irc_agent.py'))) { return $c }
+    }
+    return $null
+}
+
+function Get-WatchMachineId {
+    if ($env:BOB_MACHINE_ID) { return ([string]$env:BOB_MACHINE_ID).Trim().ToLowerInvariant() }
+    try {
+        $cfg = Join-Path $env:USERPROFILE '.grok\bob-bridge\..\..\ai\agentic_build\config\bobiverse.json'
+    } catch { }
+    foreach ($p in @(
+            'C:\ai\agentic_build\config\bobiverse.json',
+            'D:\ai\agentic_build\config\bobiverse.json'
+        )) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $j = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($j.thisMachine) { return ([string]$j.thisMachine).Trim().ToLowerInvariant() }
+            if ($j.machineId) { return ([string]$j.machineId).Trim().ToLowerInvariant() }
+        } catch { }
+    }
+    return 'flamingo'
+}
+
+function Get-WatchIrcListenRows {
+    param([string]$ResolvedHome)
+    $watchHome = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
+    $esc = [regex]::Escape($watchHome)
+    return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_listen\.py' -and $cl -match $esc
+        })
+}
+
+function Ensure-WatchIrcSeat {
+    # CAST IRON (Simon 2026-09-23): systray / Watch-AgentHealth launch MUST connect
+    # irc_agent + irc_listen on this home and JOIN all seat channels
+    # (#bobiverse, #{machine}, #agentic_irc). Monitor then forwards FROM.
+    param($State)
+    $home = [string]$State.ircHome
+    if (-not $home) { return $State }
+    $resolved = [IO.Path]::GetFullPath($home)
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
+        Write-WatchLog 'irc ensure skipped (forbidden home)'
+        return $State
+    }
+    New-Item -ItemType Directory -Force -Path $resolved | Out-Null
+    $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    if ($agents.Count -gt 0 -and $listens.Count -gt 0) {
+        $nick = ''
+        if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
+        Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId)
+        return $State
+    }
+    $scripts = Resolve-AgenticIrcScriptsDir
+    if (-not $scripts) {
+        Write-WatchLog 'irc ensure FAILED: agentic_irc scripts not found (irc_agent.py)'
+        return $State
+    }
+    $pwFile = Join-Path $env:USERPROFILE '.grok\ergo\connect.password'
+    if (-not (Test-Path -LiteralPath $pwFile)) {
+        Write-WatchLog "irc ensure FAILED: missing $pwFile"
+        return $State
+    }
+    $mid = Get-WatchMachineId
+    $seatPid = $PID
+    $coordPath = Join-Path $resolved 'coordinator.pid'
+    if (Test-Path -LiteralPath $coordPath) {
+        foreach ($line in @(Get-Content -LiteralPath $coordPath -ErrorAction SilentlyContinue)) {
+            if ($line -match '^seat=(.+)$') {
+                $s = $Matches[1].Trim()
+                if ($s -match '^\d+$') { $seatPid = $s }
+            }
+        }
+    }
+    $nick = ('{0}-{1}' -f $mid, $seatPid)
+    $channels = ('#bobiverse,#{0},#agentic_irc' -f $mid)
+    $env:AGENTIC_IRC_PASSWORD = (Get-Content -LiteralPath $pwFile -Raw).Trim()
+    $env:AGENTIC_IRC_DEBUG = '1'
+    $env:AGENTIC_IRC_SEAT_PID = "$seatPid"
+    $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $py) {
+        Write-WatchLog 'irc ensure FAILED: python not on PATH'
+        return $State
+    }
+    $agentPath = Join-Path $scripts 'irc_agent.py'
+    $listenPath = Join-Path $scripts 'irc_listen.py'
+    if ($agents.Count -eq 0) {
+        Write-WatchLog ("irc ensure start agent nick={0} channels={1} home={2}" -f $nick, $channels, $resolved)
+        Start-Process -FilePath $py -ArgumentList @(
+            '-u', $agentPath,
+            '--host', 'irc.ntsa.uk',
+            '--port', '6697',
+            '--channel', $channels,
+            '--home', $resolved,
+            '--nick', $nick
+        ) -WindowStyle Hidden | Out-Null
+        Start-Sleep -Milliseconds 900
+    }
+    $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    if ($listens.Count -eq 0) {
+        $stdoutLog = Join-Path $resolved 'listen.stdout.log'
+        $stderrLog = Join-Path $resolved 'listen.stderr.log'
+        Write-WatchLog ("irc ensure start listen home={0}" -f $resolved)
+        Start-Process -FilePath $py -ArgumentList @('-u', $listenPath, '--home', $resolved) `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog | Out-Null
+        Start-Sleep -Milliseconds 400
+    }
+    $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    $agentPid = if ($agents.Count -gt 0) { $agents[0].ProcessId } else { '' }
+    $listenPid = if ($listens.Count -gt 0) { $listens[0].ProcessId } else { '' }
+    @(
+        "nick=$nick"
+        "seat=$seatPid"
+        "listen=$listenPid"
+        "agent=$agentPid"
+        "home=$resolved"
+        "channels=$channels"
+    ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+    if ($agents.Count -eq 0 -or $listens.Count -eq 0) {
+        Write-WatchLog ("irc ensure incomplete agent={0} listen={1}" -f $agentPid, $listenPid)
+    }
+    else {
+        Write-WatchLog ("irc ensure ok nick={0} agent={1} listen={2} channels={3}" -f $nick, $agentPid, $listenPid, $channels)
+    }
+    $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
+    $State | Add-Member -NotePropertyName 'ircChannels' -NotePropertyValue $channels -Force
+    return $State
+}
+
 function Get-WatchIrcAgentRows {
     param([string]$ResolvedHome)
     $watchHome = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
@@ -537,8 +680,8 @@ function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
-        "IRC home $ResolvedIrcHome - you own irc_agent; monitor tails irc.log and forwards FROM lines into this session."
-        'Event-driven: act on monitor payloads; reply on outbox; ping->pong. No UAT.'
+        "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (all seat channels)."
+        'You are NOT on IRC by reading irc.log or counting processes — you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
 
@@ -546,12 +689,13 @@ function Get-AgentPrompt {
     param([string]$ResolvedIrcHome)
     return @(
         'You are a fleet agent on this Windows box (watch seat).'
-        'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, tail irc.log, resume-forward each IRC PRIVMSG into this session). You do not run, restart, or reimplement the monitor.'
-        'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types in this IDE turn. Do not idle-wait in chat for the monitor; finish the turn after acting.'
-        'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (join/talk Ergo; no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc .grok/skills; AgentMonitor playbooks stay in this repo.'
-        "IRC home: $ResolvedIrcHome. You own irc_agent (+ irc_listen per agentic-irc). Monitor tails irc.log and forwards PRIVMSG; you do not tail IRC in-session."
+        'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, start irc_agent+irc_listen, tail irc.log, forward each IRC PRIVMSG into this session as FROM). You do not run, restart, or reimplement the monitor.'
+        'CAST IRON: you are not "on IRC" by probing irc.log / processes. IRC data arrives only as monitor-forwarded FROM lines. Prefer that wake path; do not arm in-session ^FROM TSR.'
+        'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types here. Do not idle-wait in chat for the monitor; finish the turn after acting.'
+        'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc; AgentMonitor playbooks stay in this repo.'
+        "IRC home: $ResolvedIrcHome. Seat JOINs #bobiverse, #{machine}, #agentic_irc. Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
-        'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box; ping -> pong on that target. Then end turn.'
+        'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
@@ -1141,6 +1285,8 @@ if ($New) {
 
 $state = Initialize-WatchIrcHome -State $state
 [void](Clear-OrphanWatchProcessesOnStart -ResolvedHome ([string]$state.ircHome))
+# After orphan prune: always (re)connect IRC for this watch home (systray CAST IRON).
+$state = Ensure-WatchIrcSeat -State $state
 if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
@@ -1153,6 +1299,14 @@ try {
 
     while ($true) {
         try {
+        # Keep IRC up while the seat is live (agent+listen on all channels).
+        if (-not (Test-CursorPrintOnlyMode -State $state) -or $script:KindName -eq 'grok') {
+            $ag = @(Get-WatchIrcAgentRows -ResolvedHome ([string]$state.ircHome))
+            $li = @(Get-WatchIrcListenRows -ResolvedHome ([string]$state.ircHome))
+            if ($ag.Count -eq 0 -or $li.Count -eq 0) {
+                $state = Ensure-WatchIrcSeat -State $state
+            }
+        }
         $needStart = $false
         if (-not $current) {
             $needStart = $true
