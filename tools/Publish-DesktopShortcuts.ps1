@@ -1,15 +1,20 @@
 # Publish Desktop + repo shortcuts for AgentMonitor.
 # CAST IRON: every link launches -New (skills + prompt). IconLocation = agent .exe.
+# The .lnk files hold this machine's paths (clone dir, agent exe icon), so repo
+# shortcuts\*.lnk are GENERATED per machine and gitignored (see shortcuts\README.md).
+# Never commit them: a tracked copy is rewritten on every install and dirties the clone.
 [CmdletBinding()]
 param(
     [string]$MonitorDir,
+    [string]$DesktopDir,
     [switch]$DesktopOnly
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $MonitorDir) { $MonitorDir = $PSScriptRoot + '\..' }
 $MonitorDir = (Resolve-Path -LiteralPath $MonitorDir).Path
-$desktop = [Environment]::GetFolderPath('Desktop')
+$desktop = if ($DesktopDir) { $DesktopDir } else { [Environment]::GetFolderPath('Desktop') }
+New-Item -ItemType Directory -Force -Path $desktop | Out-Null
 $shortcutsDir = Join-Path $MonitorDir 'shortcuts'
 New-Item -ItemType Directory -Force -Path $shortcutsDir | Out-Null
 
