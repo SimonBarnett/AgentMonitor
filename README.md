@@ -25,7 +25,7 @@ Watch-AgentHealth.cmd cursor new off
 - **`off`** — neither window; monitor log still receives lines. One-shot `agent -p` forwards stay hidden.
 - **`new` / `resume` and `off`** may appear in either order on the main `.cmd`.
 
-One-click `.cmd` files and Desktop shortcuts start in the background (`-Windows off`) and **always** pass `-New`. Legacy `*Resume*` shortcut names still launch a new session. Refresh Desktop icons with `tools\Publish-DesktopShortcuts.ps1` (IconLocation = agent `.exe`).
+One-click `.cmd` files and Desktop shortcuts start in the background (`-Windows off`) and **always** pass `-New`. Legacy `*Resume*` shortcut names still launch a new session. Refresh Desktop icons with `tools\Publish-DesktopShortcuts.ps1` (IconLocation = agent `.exe`). Repo `shortcuts/*.lnk` are generated per machine and gitignored, so publishing never dirties the clone.
 
 **Skills:** `.grok/skills/agent-monitor` and `.grok/skills/watch-seat` (also under `.cursor/skills/`).
 

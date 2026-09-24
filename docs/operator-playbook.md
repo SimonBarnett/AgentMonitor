@@ -162,7 +162,7 @@ Do not commit logs, state files, IRC homes, or secrets.
 
 ### UNKNOWN
 
-- Exact Desktop shortcut icon paths on each fleet machine (UNKNOWN; repo `shortcuts/` contains the `.lnk` files in the tree).
+- Exact Desktop shortcut icon paths on each fleet machine (UNKNOWN; repo `shortcuts/*.lnk` are generated per machine by `tools\Publish-DesktopShortcuts.ps1` and gitignored, so only `shortcuts/README.md` is tracked).
 - Whether Desktop copies on flamingo / marchhare / ionos match commit `1a09848` or later SHAs.
 
 ---
