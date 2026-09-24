@@ -664,7 +664,8 @@ function Get-WatchMachineId {
             if ($j.machineId) { return ([string]$j.machineId).Trim().ToLowerInvariant() }
         } catch { }
     }
-    return 'flamingo'
+    # Never default to another box's id (seat would JOIN #flamingo as flamingo-<pid> from here).
+    return ([string]$env:COMPUTERNAME).Trim().ToLowerInvariant()
 }
 
 function Get-WatchIrcListenRows {
@@ -675,6 +676,41 @@ function Get-WatchIrcListenRows {
             $cl = [string]$_.CommandLine
             $cl -match 'irc_listen\.py' -and $cl -match $esc
         })
+}
+
+function Resolve-WatchSeatPid {
+    # coordinator.pid outlives the seat that wrote it. A dead seat= pid gives the new irc_agent the
+    # talk-seat nick <mid>-<deadpid>; irc_agent's seat liveness loop then QUITs ("seat ended").
+    # Honour seat= only while that process is running; otherwise this watcher is the seat.
+    param([string]$CoordPath, [int]$Default = $PID)
+    if ($CoordPath -and (Test-Path -LiteralPath $CoordPath)) {
+        foreach ($line in @(Get-Content -LiteralPath $CoordPath -ErrorAction SilentlyContinue)) {
+            if ($line -match '^seat=(\d+)\s*$') {
+                $s = [int]$Matches[1]
+                if ($s -gt 0 -and (Get-Process -Id $s -ErrorAction SilentlyContinue)) { return $s }
+                Write-WatchLog ("irc ensure ignoring stale coordinator seat={0} (not running); seat={1}" -f $s, $Default)
+            }
+        }
+    }
+    return $Default
+}
+
+function Clear-WatchStaleQuitRequest {
+    # Disconnect-WatchIrc leaves quit.req / agent.quit.request for the irc_agent it stops. With no
+    # irc_agent live on this home they are leftovers, and agent_control.consume_quit_request has no
+    # age check - the next irc_agent would QUIT right after connecting.
+    param([string]$ResolvedHome)
+    foreach ($leaf in @('agent.quit.request', 'quit.req')) {
+        $p = Join-Path $ResolvedHome $leaf
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+            Write-WatchLog ("irc ensure removed stale {0}" -f $leaf)
+        }
+        catch {
+            Write-WatchLog ("irc ensure could not remove stale {0}: {1}" -f $leaf, $_.Exception.Message)
+        }
+    }
 }
 
 function Ensure-WatchIrcSeat {
@@ -718,15 +754,10 @@ function Ensure-WatchIrcSeat {
         return $State
     }
     $mid = Get-WatchMachineId
-    $seatPid = $PID
     $coordPath = Join-Path $resolved 'coordinator.pid'
-    if (Test-Path -LiteralPath $coordPath) {
-        foreach ($line in @(Get-Content -LiteralPath $coordPath -ErrorAction SilentlyContinue)) {
-            if ($line -match '^seat=(.+)$') {
-                $s = $Matches[1].Trim()
-                if ($s -match '^\d+$') { $seatPid = $s }
-            }
-        }
+    $seatPid = Resolve-WatchSeatPid -CoordPath $coordPath -Default $PID
+    if ($agents.Count -eq 0) {
+        Clear-WatchStaleQuitRequest -ResolvedHome $resolved
     }
     $nick = ('{0}-{1}' -f $mid, $seatPid)
     $channels = ('#bobiverse,#{0},#agentic_irc' -f $mid)
@@ -742,14 +773,14 @@ function Ensure-WatchIrcSeat {
     $listenPath = Join-Path $scripts 'irc_listen.py'
     if ($agents.Count -eq 0) {
         Write-WatchLog ("irc ensure start agent nick={0} channels={1} home={2}" -f $nick, $channels, $resolved)
-        Start-Process -FilePath $py -ArgumentList @(
-            '-u', $agentPath,
-            '--host', 'irc.ntsa.uk',
-            '--port', '6697',
-            '--channel', $channels,
-            '--home', $resolved,
-            '--nick', $nick
-        ) -WindowStyle Hidden | Out-Null
+        Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @(
+                '-u', $agentPath,
+                '--host', 'irc.ntsa.uk',
+                '--port', '6697',
+                '--channel', $channels,
+                '--home', $resolved,
+                '--nick', $nick
+            )) -WindowStyle Hidden | Out-Null
         Start-Sleep -Milliseconds 900
     }
     $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
@@ -757,7 +788,7 @@ function Ensure-WatchIrcSeat {
         $stdoutLog = Join-Path $resolved 'listen.stdout.log'
         $stderrLog = Join-Path $resolved 'listen.stderr.log'
         Write-WatchLog ("irc ensure start listen home={0}" -f $resolved)
-        Start-Process -FilePath $py -ArgumentList @('-u', $listenPath, '--home', $resolved) `
+        Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @('-u', $listenPath, '--home', $resolved)) `
             -WindowStyle Hidden `
             -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog | Out-Null
         Start-Sleep -Milliseconds 400
