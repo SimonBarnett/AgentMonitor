@@ -1,14 +1,16 @@
-<#
+﻿<#
 .SYNOPSIS
   Start grok agent.exe or Cursor agent.cmd; watch the agent process; forward IRC FROM lines when the agent's listener exists.
 
 .DESCRIPTION
   Simon #bobiverse 2026-09-22: --grok / --cursor. Persist session id (resume, no full skill reload).
-  Does not start, stop, or health-check irc_listen — the agent connects to IRC per agentic-irc.
-  Monitor tails $IrcHome/irc.log (agent debug firehose) and resume-forwards each PRIVMSG as FROM into the agent.
+  CAST IRON (Simon 2026-09-23): Ensure-WatchIrcSeat starts irc_agent + irc_listen on the watch
+  home and JOINs #bobiverse, #{machine}, #agentic_irc (systray Agents / every launch).
+  Monitor tails $IrcHome/irc.log and forwards each PRIVMSG as FROM into the agent.
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
   Does not stamp UAT. Does not send !bobiverse.
+  The TUI agent does not probe IRC â€” it acts on monitor FROM only (skill watch-seat).
 
 .EXAMPLE
   Desktop\Watch-AgentHealth.cmd cursor
@@ -31,6 +33,9 @@ param(
 
     [switch]$WatchWorker,
 
+    # Cursor agent --model (e.g. auto). Empty = CLI default. Tray Agents always passes auto.
+    [string]$Model = '',
+
     [ValidateSet('on', 'off')]
     [string]$Windows = 'on',
 
@@ -44,6 +49,19 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:AgentTuiWindowStyle = $(if ($Windows -eq 'on') { 'Normal' } else { 'Hidden' })
+$script:CursorModel = ([string]$Model).Trim()
+
+function Get-CursorModelCliArgs {
+    if (-not $script:CursorModel) { return @() }
+    return @('--model', $script:CursorModel)
+}
+
+function Format-CursorModelCliFragment {
+    # Single-quoted PowerShell fragment for embedded launch scripts.
+    if (-not $script:CursorModel) { return '' }
+    $esc = $script:CursorModel.Replace("'", "''")
+    return " --model '$esc'"
+}
 
 if (-not $Grok -and -not $Cursor) {
     throw 'Pass --grok (agent.exe) or --cursor (agent.cmd).'
@@ -81,6 +99,10 @@ $Cwd = Resolve-AgentWorkspace -Requested $Cwd -Explicit:$CwdExplicit
 
 $script:KindName = $(if ($Cursor) { 'cursor' } else { 'grok' })
 $script:StateDir = Join-Path $env:USERPROFILE '.grok\agent-health'
+$script:IrcHomeExplicit = [bool]($PSBoundParameters.ContainsKey('IrcHome') -and $IrcHome)
+$script:ClientSlot = 1
+$script:BoundIrcHome = $null
+# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 â€¦).
 $script:StatePath = Join-Path $script:StateDir ("state-{0}.json" -f $script:KindName)
 $script:WorkerPidPath = Join-Path $script:StateDir ("watch-worker-{0}.pid" -f $script:KindName)
 if (-not $IrcHome) {
@@ -344,12 +366,17 @@ function Stop-CursorAgentNodesForSession {
 }
 
 function Stop-OrphanCursorWatchForwards {
+    # Only prune hung forwards for THIS slot's StateDir. Never touch another seat's
+    # forward-cursor.ps1 / live Git-task nodes.
     $stopped = 0
+    $escDir = $null
+    if ($script:StateDir) { $escDir = [regex]::Escape([IO.Path]::GetFullPath($script:StateDir)) }
     $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     foreach ($row in $rows) {
         $cl = [string]$row.CommandLine
         if (Test-CursorAgentNodeIsProtected -CommandLine $cl) { continue }
-        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor\.ps1') {
+        if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor') {
+            if ($escDir -and $cl -notmatch $escDir) { continue }
             Write-WatchLog ("prune hung watch forward powershell pid={0}" -f $row.ProcessId)
             Stop-WatchedTree -RootPid ([int]$row.ProcessId)
             $stopped++
@@ -367,12 +394,129 @@ function Stop-OrphanCursorWatchForwards {
     return $stopped
 }
 
+function Get-LiveWatchWorkerRows {
+    param(
+        [string]$Kind,
+        [string]$SeatHome,
+        [int]$ExcludePid = 0
+    )
+    $kindFlag = if ($Kind -eq 'grok') { '-Grok' } else { '-Cursor' }
+    $full = $null
+    $isDefaultSlot1 = $false
+    if ($seatHome) {
+        $full = [IO.Path]::GetFullPath($seatHome).TrimEnd('\')
+        $base = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}' -f $Kind))).TrimEnd('\')
+        $isDefaultSlot1 = ($full -eq $base)
+    }
+    $hits = @()
+    foreach ($row in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)) {
+        $opid = [int]$row.ProcessId
+        if ($ExcludePid -gt 0 -and $opid -eq $ExcludePid) { continue }
+        $cl = [string]$row.CommandLine
+        if ($cl -notmatch 'Watch-AgentHealth\.ps1') { continue }
+        if ($cl -notmatch '-WatchWorker') { continue }
+        if ($cl -notmatch [regex]::Escape($kindFlag)) { continue }
+        if ($full) {
+            $esc = [regex]::Escape($full)
+            $mentionsHome = ($cl -match $esc)
+            $defaultNoFlag = ($isDefaultSlot1 -and $cl -notmatch '-IrcHome')
+            if (-not $mentionsHome -and -not $defaultNoFlag) { continue }
+        }
+        $hits += ,$row
+    }
+    return $hits
+}
+
+function Test-WatchHomeInUse {
+    param(
+        [string]$SeatHome,
+        [int]$ExcludePid = 0
+    )
+    return (@(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $ExcludePid).Count -gt 0)
+}
+
+function Get-WatchSlotCandidates {
+    param([string]$Kind)
+    $base = Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}' -f $Kind)
+    $list = @([IO.Path]::GetFullPath($base))
+    for ($i = 2; $i -le 16; $i++) {
+        $list += ,([IO.Path]::GetFullPath(('{0}-{1}' -f $base, $i)))
+    }
+    return $list
+}
+
+function Get-WatchSlotNumberFromHome {
+    param([string]$SeatHome, [string]$Kind)
+    $full = [IO.Path]::GetFullPath($seatHome).TrimEnd('\')
+    $base = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ('.agentic-irc-watch-{0}' -f $Kind))).TrimEnd('\')
+    if ($full -eq $base) { return 1 }
+    if ($full -match ('^{0}-([0-9]+)$' -f [regex]::Escape($base))) {
+        return [int]$Matches[1]
+    }
+    return 1
+}
+
+function Resolve-NextFreeWatchIrcHome {
+    param(
+        [string]$Kind,
+        [int]$ExcludePid = 0
+    )
+    foreach ($h in @(Get-WatchSlotCandidates -Kind $Kind)) {
+        if (-not (Test-WatchHomeInUse -SeatHome $h -ExcludePid $ExcludePid)) {
+            return $h
+        }
+    }
+    throw ("All 16 watch-{0} slots are in use (live Watch-AgentHealth workers)." -f $Kind)
+}
+
+function Bind-WatchSlot {
+    # Pick next free IRC home (or keep -IrcHome), isolate state/log/worker pid per slot.
+    if ($script:IrcHomeExplicit) {
+        $resolved = [IO.Path]::GetFullPath($IrcHome)
+    }
+    else {
+        $resolved = Resolve-NextFreeWatchIrcHome -Kind $script:KindName -ExcludePid $PID
+    }
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
+        throw "Refusing IrcHome $resolved (talk-seat / bobiverse). Use .agentic-irc-watch-*."
+    }
+    $slot = Get-WatchSlotNumberFromHome -SeatHome $resolved -Kind $script:KindName
+    $script:ClientSlot = $slot
+    $script:BoundIrcHome = $resolved
+    $IrcHome = $resolved
+    $script:StateDir = Join-Path $env:USERPROFILE ('.grok\agent-health\watch-{0}-{1}' -f $script:KindName, $slot)
+    New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $resolved | Out-Null
+    $script:StatePath = Join-Path $script:StateDir 'state.json'
+    $script:WorkerPidPath = Join-Path $script:StateDir 'watch-worker.pid'
+    if (-not $LogPath) {
+        $desk = Join-Path $env:USERPROFILE 'Desktop\Watch-AgentHealth'
+        New-Item -ItemType Directory -Force -Path $desk | Out-Null
+        if ($slot -le 1) {
+            $script:LogFile = Join-Path $desk 'Watch-AgentHealth.log'
+        }
+        else {
+            $script:LogFile = Join-Path $desk ('Watch-AgentHealth-{0}.log' -f $slot)
+        }
+    }
+    else {
+        $script:LogFile = $LogPath
+    }
+    Write-WatchLog ("bind slot={0} ircHome={1} stateDir={2}" -f $slot, $resolved, $script:StateDir)
+}
+
 function Stop-OrphanWatchPythonForHome {
     param([string]$ResolvedHome)
     if (-not $ResolvedHome) { return 0 }
     $resolved = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         Write-WatchLog 'orphan python prune skipped (forbidden home)'
+        return 0
+    }
+    # Never kill IRC for a home another live watch worker still owns.
+    $others = @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $resolved -ExcludePid $PID)
+    if ($others.Count -gt 0) {
+        Write-WatchLog ("orphan python prune skipped - {0} live watch worker(s) own {1}" -f $others.Count, $resolved)
         return 0
     }
     $esc = [regex]::Escape($resolved)
@@ -382,9 +526,26 @@ function Stop-OrphanWatchPythonForHome {
             ($cl -match 'irc_listen\.py' -or $cl -match 'irc_agent\.py') -and $cl -match $esc
         })
     foreach ($row in $rows) {
-        # Only prune when there is no live watch worker owning this home yet, or process is orphaned
-        # from a prior crash: always safe for *this* home's listen/agent if we are restarting.
-        Write-WatchLog ("prune orphan watch python pid={0}" -f $row.ProcessId)
+        Write-WatchLog ("prune orphan watch python pid={0} home={1}" -f $row.ProcessId, $resolved)
+        Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+        $stopped++
+    }
+    return $stopped
+}
+
+function Stop-OrphanCursorAgentNodesForSlot {
+    # Leftover interactive/print cursor-agent nodes for THIS slot session only are
+    # handled via Stop-CursorAgentNodesForSession. Also prune stray -p nodes that
+    # reference this StateDir path in their command line.
+    $stopped = 0
+    if (-not $script:StateDir) { return 0 }
+    $escDir = [regex]::Escape([IO.Path]::GetFullPath($script:StateDir))
+    foreach ($row in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
+        $cl = [string]$row.CommandLine
+        if ($cl -notmatch 'cursor-agent') { continue }
+        if (Test-CursorAgentNodeIsProtected -CommandLine $cl) { continue }
+        if ($cl -notmatch $escDir) { continue }
+        Write-WatchLog ("prune orphan cursor-agent node pid={0} (slot stateDir)" -f $row.ProcessId)
         Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
         $stopped++
     }
@@ -395,9 +556,10 @@ function Clear-OrphanWatchProcessesOnStart {
     param([string]$ResolvedHome)
     $n = 0
     $n += Stop-OrphanCursorWatchForwards
+    $n += Stop-OrphanCursorAgentNodesForSlot
     $n += Stop-OrphanWatchPythonForHome -ResolvedHome $ResolvedHome
     if ($n -gt 0) {
-        Write-WatchLog "watch start pruned $n orphan python/node process(es)"
+        Write-WatchLog "watch start pruned $n orphan python/node process(es) for this slot"
     }
     return $n
 }
@@ -469,6 +631,160 @@ function Initialize-WatchIrcHome {
     return $State
 }
 
+function Resolve-AgenticIrcScriptsDir {
+    # Prefer a complete tree (irc_agent imports bob_recycle). Skills copy can lag.
+    foreach ($c in @(
+            'C:\ai\agentic_irc\scripts',
+            'D:\ai\agentic_irc\scripts',
+            'E:\ai\agentic_irc\scripts',
+            'C:\src\agentic_irc\scripts',
+            (Join-Path $env:USERPROFILE '.grok\skills\agentic-irc\scripts')
+        )) {
+        if (-not $c) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $c 'irc_agent.py'))) { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $c 'bob_recycle.py'))) { continue }
+        return $c
+    }
+    return $null
+}
+
+function Get-WatchMachineId {
+    if ($env:BOB_MACHINE_ID) { return ([string]$env:BOB_MACHINE_ID).Trim().ToLowerInvariant() }
+    try {
+        $cfg = Join-Path $env:USERPROFILE '.grok\bob-bridge\..\..\ai\agentic_build\config\bobiverse.json'
+    } catch { }
+    foreach ($p in @(
+            'C:\ai\agentic_build\config\bobiverse.json',
+            'D:\ai\agentic_build\config\bobiverse.json'
+        )) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $j = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($j.thisMachine) { return ([string]$j.thisMachine).Trim().ToLowerInvariant() }
+            if ($j.machineId) { return ([string]$j.machineId).Trim().ToLowerInvariant() }
+        } catch { }
+    }
+    return 'flamingo'
+}
+
+function Get-WatchIrcListenRows {
+    param([string]$ResolvedHome)
+    $watchHome = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
+    $esc = [regex]::Escape($watchHome)
+    return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $cl = [string]$_.CommandLine
+            $cl -match 'irc_listen\.py' -and $cl -match $esc
+        })
+}
+
+function Ensure-WatchIrcSeat {
+    # CAST IRON (Simon 2026-09-23): systray / Watch-AgentHealth launch MUST connect
+    # irc_agent + irc_listen on this home and JOIN all seat channels
+    # (#bobiverse, #{machine}, #agentic_irc). Monitor then forwards FROM.
+    param($State)
+    $seatHome = [string]$State.ircHome
+    if (-not $seatHome) { return $State }
+    $resolved = [IO.Path]::GetFullPath($seatHome)
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
+        Write-WatchLog 'irc ensure skipped (forbidden home)'
+        return $State
+    }
+    New-Item -ItemType Directory -Force -Path $resolved | Out-Null
+    $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    if ($agents.Count -gt 1 -or $listens.Count -gt 1) {
+        Write-WatchLog ("irc ensure collapsing duplicates agent={0} listen={1}" -f $agents.Count, $listens.Count)
+        foreach ($row in @($agents + $listens)) {
+            Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 500
+        $agents = @()
+        $listens = @()
+    }
+    if ($agents.Count -gt 0 -and $listens.Count -gt 0) {
+        $nick = ''
+        if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
+        Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId)
+        return $State
+    }
+    $scripts = Resolve-AgenticIrcScriptsDir
+    if (-not $scripts) {
+        Write-WatchLog 'irc ensure FAILED: agentic_irc scripts not found (irc_agent.py)'
+        return $State
+    }
+    $pwFile = Join-Path $env:USERPROFILE '.grok\ergo\connect.password'
+    if (-not (Test-Path -LiteralPath $pwFile)) {
+        Write-WatchLog "irc ensure FAILED: missing $pwFile"
+        return $State
+    }
+    $mid = Get-WatchMachineId
+    $seatPid = $PID
+    $coordPath = Join-Path $resolved 'coordinator.pid'
+    if (Test-Path -LiteralPath $coordPath) {
+        foreach ($line in @(Get-Content -LiteralPath $coordPath -ErrorAction SilentlyContinue)) {
+            if ($line -match '^seat=(.+)$') {
+                $s = $Matches[1].Trim()
+                if ($s -match '^\d+$') { $seatPid = $s }
+            }
+        }
+    }
+    $nick = ('{0}-{1}' -f $mid, $seatPid)
+    $channels = ('#bobiverse,#{0},#agentic_irc' -f $mid)
+    $env:AGENTIC_IRC_PASSWORD = (Get-Content -LiteralPath $pwFile -Raw).Trim()
+    $env:AGENTIC_IRC_DEBUG = '1'
+    $env:AGENTIC_IRC_SEAT_PID = "$seatPid"
+    $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $py) {
+        Write-WatchLog 'irc ensure FAILED: python not on PATH'
+        return $State
+    }
+    $agentPath = Join-Path $scripts 'irc_agent.py'
+    $listenPath = Join-Path $scripts 'irc_listen.py'
+    if ($agents.Count -eq 0) {
+        Write-WatchLog ("irc ensure start agent nick={0} channels={1} home={2}" -f $nick, $channels, $resolved)
+        Start-Process -FilePath $py -ArgumentList @(
+            '-u', $agentPath,
+            '--host', 'irc.ntsa.uk',
+            '--port', '6697',
+            '--channel', $channels,
+            '--home', $resolved,
+            '--nick', $nick
+        ) -WindowStyle Hidden | Out-Null
+        Start-Sleep -Milliseconds 900
+    }
+    $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    if ($listens.Count -eq 0) {
+        $stdoutLog = Join-Path $resolved 'listen.stdout.log'
+        $stderrLog = Join-Path $resolved 'listen.stderr.log'
+        Write-WatchLog ("irc ensure start listen home={0}" -f $resolved)
+        Start-Process -FilePath $py -ArgumentList @('-u', $listenPath, '--home', $resolved) `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog | Out-Null
+        Start-Sleep -Milliseconds 400
+    }
+    $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    $agentPid = if ($agents.Count -gt 0) { $agents[0].ProcessId } else { '' }
+    $listenPid = if ($listens.Count -gt 0) { $listens[0].ProcessId } else { '' }
+    @(
+        "nick=$nick"
+        "seat=$seatPid"
+        "listen=$listenPid"
+        "agent=$agentPid"
+        "home=$resolved"
+        "channels=$channels"
+    ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+    if ($agents.Count -eq 0 -or $listens.Count -eq 0) {
+        Write-WatchLog ("irc ensure incomplete agent={0} listen={1}" -f $agentPid, $listenPid)
+    }
+    else {
+        Write-WatchLog ("irc ensure ok nick={0} agent={1} listen={2} channels={3}" -f $nick, $agentPid, $listenPid, $channels)
+    }
+    $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
+    $State | Add-Member -NotePropertyName 'ircChannels' -NotePropertyValue $channels -Force
+    return $State
+}
+
 function Get-WatchIrcAgentRows {
     param([string]$ResolvedHome)
     $watchHome = [IO.Path]::GetFullPath($ResolvedHome).TrimEnd('\')
@@ -521,8 +837,8 @@ function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
-        "IRC home $ResolvedIrcHome - you own irc_agent; monitor tails irc.log and forwards FROM lines into this session."
-        'Event-driven: act on monitor payloads; reply on outbox; ping->pong. No UAT.'
+        "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (all seat channels)."
+        'You are NOT on IRC by reading irc.log or counting processes â€” you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
 
@@ -530,12 +846,13 @@ function Get-AgentPrompt {
     param([string]$ResolvedIrcHome)
     return @(
         'You are a fleet agent on this Windows box (watch seat).'
-        'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, tail irc.log, resume-forward each IRC PRIVMSG into this session). You do not run, restart, or reimplement the monitor.'
-        'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types in this IDE turn. Do not idle-wait in chat for the monitor; finish the turn after acting.'
-        'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (join/talk Ergo; no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc .grok/skills; AgentMonitor playbooks stay in this repo.'
-        "IRC home: $ResolvedIrcHome. You own irc_agent (+ irc_listen per agentic-irc). Monitor tails irc.log and forwards PRIVMSG; you do not tail IRC in-session."
+        'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, start irc_agent+irc_listen, tail irc.log, forward each IRC PRIVMSG into this session as FROM). You do not run, restart, or reimplement the monitor.'
+        'CAST IRON: you are not "on IRC" by probing irc.log / processes. IRC data arrives only as monitor-forwarded FROM lines. Prefer that wake path; do not arm in-session ^FROM TSR.'
+        'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types here. Do not idle-wait in chat for the monitor; finish the turn after acting.'
+        'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc; AgentMonitor playbooks stay in this repo.'
+        "IRC home: $ResolvedIrcHome. Seat JOINs #bobiverse, #{machine}, #agentic_irc. Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
-        'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box; ping -> pong on that target. Then end turn.'
+        'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
@@ -594,8 +911,7 @@ function Test-DropIrcLine {
     param([string]$Line)
     if ($Line -notmatch '^FROM ') { return $true }
     if ($Line -match ' POINT | DIGEST | AGPK | SEAL ') { return $true }
-    # Spaced token only (keeps "ping me" forwarding — issue #7). Bare EOL PING handled in Send-IrcLineToSession.
-    if ($Line -cmatch ' PING ') { return $true }
+    # Do NOT drop chat PING here â€” Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false
 }
@@ -611,10 +927,41 @@ function Get-IrcFromParts {
     }
 }
 
-function Test-BareIrcPingText {
-    param([string]$Text)
-    # Whole PRIVMSG body is ping/PING only (optional surrounding whitespace already trimmed).
-    return [bool]($Text -match '^(?i)ping$')
+function Get-WatchSeatNick {
+    param($State)
+    if ($State -and $State.ircNick) { return ([string]$State.ircNick).Trim() }
+    $seatHome = $null
+    if ($State -and $State.ircHome) { $seatHome = [string]$State.ircHome }
+    if (-not $seatHome) { $seatHome = [string]$IrcHome }
+    if (-not $seatHome) { return '' }
+    $coord = Join-Path $seatHome 'coordinator.pid'
+    if (Test-Path -LiteralPath $coord) {
+        foreach ($line in @(Get-Content -LiteralPath $coord -ErrorAction SilentlyContinue)) {
+            if ($line -match '^nick=(.+)$') { return $Matches[1].Trim() }
+        }
+    }
+    return ''
+}
+
+function Test-WatchIrcPingText {
+    param(
+        [string]$Text,
+        [string]$OurNick = ''
+    )
+    # CAST IRON: any ping aimed at this seat (bare or addressed) â€” watcher pongs, never wakes agent.
+    $t = ([string]$Text).Trim()
+    if (-not $t) { return $false }
+    if ($t -match '^(?i)ping$') { return $true }
+    if ($OurNick) {
+        $esc = [regex]::Escape($OurNick)
+        if ($t -match ("^(?i)@?{0}\s*[:,-]?\s*ping\s*$" -f $esc)) { return $true }
+        if ($t -match ("^(?i)ping\s+@?{0}\s*$" -f $esc)) { return $true }
+    }
+    # "nick: PING" with extra trailing junk stripped already; also CTCP-less "PING nick"
+    if ($t -match '^(?i)ping\b' -and $OurNick -and $t.ToLowerInvariant().Contains($OurNick.ToLowerInvariant())) {
+        return $true
+    }
+    return $false
 }
 
 function Send-WatchIrcPong {
@@ -624,11 +971,12 @@ function Send-WatchIrcPong {
         [string]$Nick
     )
     if (-not $IrcHome -or -not $Target) { return $false }
+    New-Item -ItemType Directory -Force -Path $IrcHome | Out-Null
     $outbox = Join-Path $IrcHome 'outbox.txt'
     $who = if ($Nick) { '{0}: pong' -f $Nick } else { 'pong' }
     $line = 'PRIVMSG {0} :{1}' -f $Target, $who
     [IO.File]::AppendAllText($outbox, $line + "`n", (New-Object System.Text.UTF8Encoding $false))
-    Write-WatchLog ('auto-pong {0} -> {1}' -f $Nick, $Target)
+    Write-WatchLog ('auto-pong {0} -> {1} (watcher; no agent wake)' -f $Nick, $Target)
     return $true
 }
 
@@ -643,17 +991,22 @@ function Send-IrcLineToSession {
     }
     $trim = $Line.Trim()
     if ($trim -match '^FROM ') {
+        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself â€” never forward to agent
+        # (busy seats still answer so fleet knows they are responding).
+        $parts = Get-IrcFromParts -Line $trim
+        if ($parts) {
+            $ourNick = Get-WatchSeatNick -State $State
+            if (Test-WatchIrcPingText -Text $parts.text -OurNick $ourNick) {
+                Write-WatchLog ('irc-in (auto-pong, no agent wake) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
+                $seatHome = [string]$State.ircHome
+                if (-not $seatHome) { $seatHome = $IrcHome }
+                [void](Send-WatchIrcPong -IrcHome $seatHome -Target $parts.target -Nick $parts.nick)
+                $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+                return $State
+            }
+        }
         if (Test-DropIrcLine -Line $trim) {
             Write-WatchLog ('irc-in (filtered) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
-            return $State
-        }
-        $parts = Get-IrcFromParts -Line $trim
-        if ($parts -and (Test-BareIrcPingText -Text $parts.text)) {
-            Write-WatchLog ('irc-in (auto-pong, no agent wake) {0}' -f $trim.Substring(0, [Math]::Min(200, $trim.Length)))
-            $home = [string]$State.ircHome
-            if (-not $home) { $home = $IrcHome }
-            [void](Send-WatchIrcPong -IrcHome $home -Target $parts.target -Nick $parts.nick)
-            $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
             return $State
         }
         Write-WatchLog ('irc-in {0}' -f $trim.Substring(0, [Math]::Min(350, $trim.Length)))
@@ -689,10 +1042,10 @@ function Send-IrcLineToSession {
         Write-WatchLog ('forward skipped (agent -p already running session={0})' -f $sid)
         return $State
     }
-    $fwdAgent = "& '$escAgent' --trust --force --workspace '$escCwd' -p -- `$prompt"
+    $fwdAgent = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -p -- `$prompt"
     $fwdResume = Test-CursorUseResumeCli -State $State
     if ($fwdResume) {
-        $fwdAgent = "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -p -- `$prompt"
+        $fwdAgent = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd' -p -- `$prompt"
     }
     $body = @(
         '$ErrorActionPreference = ''Stop'''
@@ -822,18 +1175,18 @@ function Start-CursorInteractiveTui {
         $escPrompt = $PromptPath.Replace("'", "''")
         $lines += "`$prompt = [IO.File]::ReadAllText('$escPrompt')"
         if ($UseResume) {
-            $lines += "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -- `$prompt"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd' -- `$prompt"
         }
         else {
-            $lines += "& '$escAgent' --trust --force --workspace '$escCwd' -- `$prompt"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -- `$prompt"
         }
     }
     else {
         if ($UseResume) {
-            $lines += "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd'"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd'"
         }
         else {
-            $lines += "& '$escAgent' --trust --force --workspace '$escCwd'"
+            $lines += "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd'"
         }
     }
     [IO.File]::WriteAllText($launch, ($lines -join [Environment]::NewLine), $utf8)
@@ -874,9 +1227,9 @@ function Invoke-CursorAgentPrint {
     $escAgent = $AgentCmd.Replace("'", "''")
     $escSid = $SessionId.Replace("'", "''")
     $escOut = $outLog.Replace("'", "''")
-    $agentLine = "& '$escAgent' --trust --force --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
+    $agentLine = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
     if ($UseResume) {
-        $agentLine = "& '$escAgent' --trust --force --resume '$escSid' --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
+        $agentLine = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --resume '$escSid' --workspace '$escCwd' -p -- `$prompt *>> '$escOut'"
     }
     $lines = @(
         '$ErrorActionPreference = ''Stop'''
@@ -965,6 +1318,9 @@ function Start-WatchedAgent {
             else {
                 $livePid = Start-CursorInteractiveTui -AgentCmd $agentCmd -WorkDir $cwdFull -SessionId $sid -PromptPath $tuiPromptPath -ResumeOnly:$resume -UseResume:$useResumeTui
             }
+            if ($script:CursorModel) {
+                Write-WatchLog ("cursor model=$($script:CursorModel)")
+            }
             if ($livePid -gt 0) {
                 $State = Sync-CursorSessionFromComposer -State $State -ComposerPid $livePid
                 $State.seenSession = $true
@@ -1017,12 +1373,16 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($Grok) { $workerArgs += '-Grok' }
     if ($Cursor) { $workerArgs += '-Cursor' }
     if ($New) { $workerArgs += '-New' }
+    if ($script:CursorModel) { $workerArgs += @('-Model', $script:CursorModel) }
     if ($PSBoundParameters.ContainsKey('Cwd')) { $workerArgs += @('-Cwd', $Cwd) }
-    if ($PSBoundParameters.ContainsKey('IrcHome')) { $workerArgs += @('-IrcHome', $IrcHome) }
+    # Always pass bound slot home so seats 2/3/4 are distinct.
+    $workerArgs += @('-IrcHome', $IrcHome)
     if ($PSBoundParameters.ContainsKey('PollSeconds')) { $workerArgs += @('-PollSeconds', [string]$PollSeconds) }
     if ($PSBoundParameters.ContainsKey('CrashBackoffSeconds')) { $workerArgs += @('-CrashBackoffSeconds', [string]$CrashBackoffSeconds) }
     if ($PSBoundParameters.ContainsKey('LogPath')) { $workerArgs += @('-LogPath', $LogPath) }
+    elseif ($script:LogFile) { $workerArgs += @('-LogPath', $script:LogFile) }
     $log = $LogPath
+    if (-not $log) { $log = $script:LogFile }
     if (-not $log) {
         $log = Join-Path $env:USERPROFILE 'Desktop\Watch-AgentHealth\Watch-AgentHealth.log'
     }
@@ -1038,15 +1398,11 @@ function Register-WatchWorkerProcess {
     New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
     $self = $PID
     $kindFlag = if ($Cursor) { '-Cursor' } else { '-Grok' }
-    $rows = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)
-    foreach ($row in $rows) {
+    $seatHome = if ($script:BoundIrcHome) { $script:BoundIrcHome } else { [string]$IrcHome }
+    # Only retire stale workers on THIS slot home â€” never kill seats 2/3/4.
+    foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
         $opid = [int]$row.ProcessId
-        if ($opid -eq $self) { continue }
-        $cl = [string]$row.CommandLine
-        if ($cl -notmatch 'Watch-AgentHealth\.ps1') { continue }
-        if ($cl -notmatch '-WatchWorker') { continue }
-        if ($cl -notmatch [regex]::Escape($kindFlag)) { continue }
-        Write-WatchLog "closing stale watch worker pid=$opid"
+        Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $seatHome)
         Stop-Process -Id $opid -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 400
@@ -1058,14 +1414,14 @@ function Register-WatchWorkerProcess {
         if ($old -gt 0 -and $old -ne $self) {
             $oldProc = Get-Process -Id $old -ErrorAction SilentlyContinue
             if ($oldProc) {
-                Write-WatchLog "replacing previous watch worker pid=$old"
+                Write-WatchLog "replacing previous watch worker pid=$old (this slot)"
                 Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Milliseconds 400
             }
         }
     }
     Set-Content -LiteralPath $script:WorkerPidPath -Value ([string]$self) -Encoding ascii -NoNewline
-    Write-WatchLog "watch worker online pid=$self kind=$($script:KindName)"
+    Write-WatchLog ("watch worker online pid={0} kind={1} slot={2} home={3}" -f $self, $script:KindName, $script:ClientSlot, $seatHome)
 }
 
 function Unregister-WatchWorkerProcess {
@@ -1088,6 +1444,8 @@ New-Item -ItemType File -Force -Path $script:LogFile | Out-Null
 if (-not $WatchWorker -and $Windows -eq 'on') {
     $WatchWorker = $true
 }
+# Next free .agentic-irc-watch-* / -2 / -3 â€¦ before spawning the detached worker.
+Bind-WatchSlot
 Start-DetachedWatchWorkerIfNeeded
 $state = Read-WatchState
 if (-not $state) {
@@ -1096,6 +1454,7 @@ if (-not $state) {
         sessionId    = [guid]::NewGuid().ToString()
         seenSession  = $false
         ircHome      = $IrcHome
+        clientSlot   = $script:ClientSlot
         ircLogOffset = 0
         rootPid      = 0
     }
@@ -1104,28 +1463,34 @@ if ($New) {
     $oldWatchSid = [string]$state.sessionId
     $state = Reset-WatchSessionForNew -State $state
     $state.kind = $script:KindName
+    $state.ircHome = $IrcHome
+    $state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:ClientSlot -Force
     Write-WatchState -Obj $state
-    Write-WatchLog "session reset (--new) session=$($state.sessionId)"
+    Write-WatchLog "session reset (--new) session=$($state.sessionId) slot=$($script:ClientSlot)"
     if ($Cursor) {
         $n = 0
         if ($oldWatchSid) {
             $n += Stop-CursorAgentNodesForSession -SessionId $oldWatchSid
         }
         $n += Stop-OrphanCursorWatchForwards
+        $n += Stop-OrphanCursorAgentNodesForSlot
         if ($n -gt 0) {
-            Write-WatchLog "cursor --new pruned $n watch leftover node(s)"
+            Write-WatchLog "cursor --new pruned $n watch leftover node(s) (this slot only)"
             Start-Sleep -Seconds 2
         }
     }
 }
 
 $state = Initialize-WatchIrcHome -State $state
+$state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:ClientSlot -Force
 [void](Clear-OrphanWatchProcessesOnStart -ResolvedHome ([string]$state.ircHome))
+# After orphan prune: always (re)connect IRC for this watch home (systray CAST IRON).
+$state = Ensure-WatchIrcSeat -State $state
 if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
 $state = Initialize-IrcLogTail -State $state
-Write-WatchLog "watch start kind=$($script:KindName) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
+Write-WatchLog "watch start kind=$($script:KindName) slot=$($script:ClientSlot) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
 
 $current = $null
 try {
@@ -1133,6 +1498,16 @@ try {
 
     while ($true) {
         try {
+        # Keep IRC up while the seat is live (agent+listen on all channels).
+        # Cursor print-only after TUI exit: do not reconnect (Disconnect already ran).
+        $skipIrc = $Cursor -and (Test-CursorPrintOnlyMode -State $state)
+        if (-not $skipIrc) {
+            $ag = @(Get-WatchIrcAgentRows -ResolvedHome ([string]$state.ircHome))
+            $li = @(Get-WatchIrcListenRows -ResolvedHome ([string]$state.ircHome))
+            if ($ag.Count -eq 0 -or $li.Count -eq 0) {
+                $state = Ensure-WatchIrcSeat -State $state
+            }
+        }
         $needStart = $false
         if (-not $current) {
             $needStart = $true

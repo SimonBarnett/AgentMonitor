@@ -34,8 +34,9 @@ Pass exactly one of `-Grok` / `-Cursor` (or `grok` / `cursor` on the main `.cmd`
 
 ## Resume vs `new`
 
-- **Resume** (default): reuses the stored `sessionId` so the agent resumes the same session and does not reload all skills from scratch.
-- **`new`**: generates a fresh `sessionId`, clears tail offsets, and starts a clean watch session. For Cursor, only leftover nodes from the **previous watch session** and hung `forward-cursor.ps1` / orphan `worker-server` processes are pruned. Fleet `Git task` / `long-running-background-tasks` nodes and other TUIs are left alone. If Composer fails to stay up (OOM / missing node), the watcher switches to print-only and does **not** relaunch a TUI every poll.
+- **Default / `new` (CAST IRON for UI):** Desktop shortcuts, tray Agents / TipForm agent icons, and `Watch-AgentHealth.cmd <kind>` without `resume` always start a **fresh** `sessionId` with full skills + seed prompt. Legacy `*Resume*` shortcut **names** still pass `-New`.
+- **`resume` (CLI only):** reuses the stored `sessionId` so the agent resumes the same session and does not reload all skills from scratch. Opt-in recovery only — never used by Desktop links or the Bob Fleet tray.
+- For Cursor `-New`, only leftover nodes from the **previous watch session** and hung `forward-cursor.ps1` / orphan `worker-server` processes are pruned. Fleet `Git task` / `long-running-background-tasks` nodes and other TUIs are left alone. If Composer fails to stay up (OOM / missing node), the watcher switches to print-only and does **not** relaunch a TUI every poll.
 
 Examples (from repo root):
 
@@ -54,19 +55,23 @@ One-click equivalents and Desktop shortcuts are **`-Windows off`**: `wscript` + 
 
 | File | Effect |
 |------|--------|
-| `Watch-AgentHealth-Grok-Resume.cmd` | Grok, resume |
+| `Watch-AgentHealth-Grok-Resume.cmd` | Grok, always `-New` (legacy name) |
 | `Watch-AgentHealth-Grok-New.cmd` | Grok, `new` |
-| `Watch-AgentHealth-Cursor-Resume.cmd` | Cursor, resume |
+| `Watch-AgentHealth-Cursor-Resume.cmd` | Cursor, always `-New` (legacy name) |
 | `Watch-AgentHealth-Cursor-New.cmd` | Cursor, `new` |
 
 ---
 
 ## IRC: own watch home only
 
-**LOCKED** — use only the watch IRC homes:
+**LOCKED** — use only the watch IRC homes (next free slot on each launch):
 
-- `%USERPROFILE%\.agentic-irc-watch-grok`
-- `%USERPROFILE%\.agentic-irc-watch-cursor`
+- `%USERPROFILE%\.agentic-irc-watch-grok` (+ `-2` … `-16`)
+- `%USERPROFILE%\.agentic-irc-watch-cursor` (+ `-2` … `-16`)
+
+Pass `-IrcHome` only to pin a slot. Default binds the next home with no live
+`Watch-AgentHealth -WatchWorker`. Orphan python/nodes pruned for **that slot
+only** on start.
 
 **Forbidden** (monitor refuses `-IrcHome` pointing here):
 
@@ -88,7 +93,12 @@ Do not point the watch seat at another agent’s IRC home.
 
 4. On first tail after start/resume without a saved offset, the monitor begins at **end of file** (no backlog flood).
 
-Filtered out (not forwarded): server numeric replies, raw `PING …` lines (in `Convert-IrcRawLineToFromLine`), certain MOOT/AGPK/ACTION patterns there, and in `Test-DropIrcLine` spaced tokens ` POINT `, ` DIGEST `, ` AGPK `, ` SEAL `, and case-sensitive ` PING ` (with trailing space). Bare chat `ping` / `PING` as the **entire** PRIVMSG body is answered by the watcher with `PRIVMSG … :nick: pong` on `outbox.txt` and is **not** forwarded to the agent (no interrupt). `ping me` and other non-bare ping text still forward (issue #7).
+Filtered out (not forwarded): server numeric replies, raw `PING …` lines (in `Convert-IrcRawLineToFromLine`), certain MOOT/AGPK/ACTION patterns there, and in `Test-DropIrcLine` spaced tokens ` POINT `, ` DIGEST `, ` AGPK `, ` SEAL `, and case-sensitive ` PING ` (with trailing space). Bare chat `ping` / `PING` (whole body) **or** addressed `nick: ping` /
+`ping nick` is answered by the watcher with `PRIVMSG … :nick: pong` on
+`outbox.txt` and is **never** forwarded to the agent (no interrupt — busy
+seats still pong). `ping me` and other non-ping text still forward (issue #7).
+Server raw `PING` lines stay dropped in `Convert-IrcRawLineToFromLine`
+(protocol; `irc_agent` handles server PONG).
 
 **LOCKED:** This seat does **not** send `!bobiverse`. Agents follow `agentic-irc` for Ergo join/talk from this home.
 

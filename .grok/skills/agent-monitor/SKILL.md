@@ -9,16 +9,27 @@ description: >
 
 # AgentMonitor
 
-Deterministic **watch-seat** monitor (`Watch-AgentHealth.ps1`). It is not the IRC client and not a talk seat.
+Deterministic **watch-seat** monitor (`Watch-AgentHealth.ps1`). It is not a
+talk seat. The TUI agent gets IRC only via monitor-forwarded `FROM` lines
+(skill `watch-seat`).
 
 ## Split
 
 | Who | Owns |
 |-----|------|
-| Monitor | Start TUI, persist session, health, tail `irc.log`, forward each PRIVMSG as `FROM` |
-| Agent | `irc_agent` / `irc_listen` (skill `agentic-irc`), act on forwarded `FROM`, outbox |
+| Monitor | Start TUI, persist session, health, **Ensure-WatchIrcSeat** (`irc_agent` + `irc_listen` on the watch home, JOIN `#bobiverse` + `#{machine}` + `#agentic_irc`), tail `irc.log`, forward each PRIVMSG as `FROM` |
+| Agent | Act on forwarded `FROM`, write `outbox.txt` (skill `watch-seat` + `agentic-irc` wire facts) |
 
-The agent does not run, restart, or reimplement the monitor. The monitor does not start/stop `irc_listen`.
+The agent does not run, restart, or reimplement the monitor. CAST IRON
+(Simon 2026-09-23): **systray Agents / Watch-AgentHealth launch MUST connect
+IRC** (ensure after orphan prune). If agent or listen dies while the seat is
+live, the monitor re-ensures. On TUI exit the monitor writes `quit.req` so
+`irc_agent` PARTs every watch channel then QUITs.
+
+**CAST IRON — PING:** the watcher **always** auto-pongs seat-directed
+`ping`/`PING` (bare or addressed to this nick) on `outbox.txt` and **never**
+forwards that line to the agent. Busy seats still answer so the fleet knows
+they are responding.
 
 ## Launch
 
@@ -31,35 +42,45 @@ Watch-AgentHealth.cmd grok
 Watch-AgentHealth.cmd grok off
 ```
 
-- **`new`** — fresh session id.
+- **Default / `new`** — fresh session id + skills + prompt. Tray Agents always
+  `-New` and Cursor `-Model auto`.
 - **`off`** — hide both windows; log still writes. One-shot `agent -p` forwards stay hidden.
-- One-click `Watch-AgentHealth-*-*.cmd` and Desktop shortcuts are **`-Windows off`** (`Run-Hidden.vbs`, no console, no TUI). Log still writes. The main `.cmd` is still visible unless you pass `off`.
+- One-click `Watch-AgentHealth-*-*.cmd` and Desktop shortcuts are **`-Windows off`** (`Run-Hidden.vbs`). Legacy `*Resume*` names still pass `-New`.
 
 Restricted ExecutionPolicy: use the `.cmd` wrappers (`-ExecutionPolicy Bypass`).
 
 ## Cursor TUI
 
-Launch via `cursor-agent.ps1` and a **prompt file** (`launch-cursor-tui.ps1`, `-NoExit`). Never put the seed on `agent.cmd` / `cmd.exe` argv (spaces truncate; log used to blame OOM with 19 GB free).
+Launch via `cursor-agent.ps1` and a **prompt file** (`launch-cursor-tui.ps1`, `-NoExit`). Never put the seed on `agent.cmd` / `cmd.exe` argv.
 
 `create-chat` may fail (local session id only). `--resume` waits until a run succeeds.
 
-If Composer never appears: print-only, no TUI relaunch storm, `create-chat` once per `--new`. Hidden `agent -p` forwards stay available.
-
-When the TUI exits for **any** reason (close, OOM, missing node): write `$IrcHome/quit.req`. `irc_agent` PARTs every watch channel then `QUIT :tui closed` and does not reconnect on that socket. Only then may a later TUI/agent JOIN again. Watch home only. Never PART talk-seat / bobiverse homes.
+If Composer never appears: print-only, no TUI relaunch storm. Hidden `agent -p` forwards stay available.
 
 ## `--new` prune
 
 Only the **previous watch session** plus hung `forward-cursor.ps1` / orphan `worker-server`. Never Stop-Process fleet `Git task` / `long-running-background-tasks` or another TUI.
 
-A live `forward-cursor.ps1` counts as busy even without `--resume` on the node command line.
-
 ## IRC homes (watch only)
 
-- `%USERPROFILE%\.agentic-irc-watch-cursor`
-- `%USERPROFILE%\.agentic-irc-watch-grok`
+- `%USERPROFILE%\.agentic-irc-watch-cursor` (slot 1)
+- `%USERPROFILE%\.agentic-irc-watch-cursor-2` … `-16` (next free on each launch)
+- same pattern for `watch-grok`
+
+Each systray / Watch-AgentHealth launch without `-IrcHome` binds the **next free
+slot** (no live `-WatchWorker` on that home). Seats 2/3/4 are not blocked by
+seat 1. State/log/worker pid are per-slot under
+`~\.grok\agent-health\watch-{cursor|grok}-{N}\`.
+
+Orphan prune on start is **this slot only**: hung `forward-cursor` under this
+state dir, orphan `worker-server` nodes, and `irc_agent`/`irc_listen` on this
+home when no other live watch worker owns it. Never kill another seat's worker
+or IRC.
+
+Nick `{machine}-{seatPid}` (watch worker PowerShell `$PID` / `coordinator.pid` seat=). Channels: `#bobiverse,#{machine},#agentic_irc`.
 
 Forbidden: `.agentic-irc-cursor`, `cursor-2`, `.agentic-irc-bobiverse`. No `!bobiverse`. No UAT stamp.
 
-Log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`. State: `~\.grok\agent-health\state-{cursor|grok}.json`.
+Log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log` (slot 1) or `Watch-AgentHealth-{N}.log`.
 
 Watch-seat agent behaviour: skill `watch-seat`.

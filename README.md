@@ -14,18 +14,18 @@ From a copy of this repo (or your deployed `Watch-AgentHealth` folder), double-c
 Watch-AgentHealth.cmd grok
 Watch-AgentHealth.cmd grok new
 Watch-AgentHealth.cmd cursor
-Watch-AgentHealth.cmd cursor new
+Watch-AgentHealth.cmd cursor resume
 Watch-AgentHealth.cmd grok off
 Watch-AgentHealth.cmd cursor new off
 ```
 
-- **`new`** — fresh session id (no skill reload from a prior resume).
-- **Without `new`** — resume the stored session.
+- **Default / `new`** — fresh session id + full skills + seed prompt (CAST IRON for all Desktop links and tray Agents clicks).
+- **`resume`** — rare recovery only; reuses the stored session id. Desktop / tray links never use this.
 - Visible by default (watch console + agent TUI). **No `on` flag.**
 - **`off`** — neither window; monitor log still receives lines. One-shot `agent -p` forwards stay hidden.
-- **`new` and `off`** may appear in either order on the main `.cmd`.
+- **`new` / `resume` and `off`** may appear in either order on the main `.cmd`.
 
-One-click `.cmd` files and Desktop shortcuts start in the background (`-Windows off`). The main `.cmd` is still visible unless you pass `off`.
+One-click `.cmd` files and Desktop shortcuts start in the background (`-Windows off`) and **always** pass `-New`. Legacy `*Resume*` shortcut names still launch a new session. Refresh Desktop icons with `tools\Publish-DesktopShortcuts.ps1` (IconLocation = agent `.exe`).
 
 **Skills:** `.grok/skills/agent-monitor` and `.grok/skills/watch-seat` (also under `.cursor/skills/`).
 
