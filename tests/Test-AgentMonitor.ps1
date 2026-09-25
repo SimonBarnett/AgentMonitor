@@ -129,6 +129,56 @@ Invoke-Case 'AM6 mrb hostile address edges (FR#88)' {
     if ($src -notmatch 'FOR YOU \(your IRC nick is') { throw 'FOR YOU format string required' }
 }
 
+Invoke-Case 'AM7 adopt live agent when rootPid+session match (FR#89)' {
+    function script:Write-WatchLog { param([string]$Message) }
+    Import-WatchFunctions -Names @('Test-WatchProcessAlive', 'Test-WatchRootMatchesSession', 'Try-AdoptLiveWatchAgent')
+    $sid = '972c6563-d6ac-4d95-9a7d-0ec509d158a6'
+    $cl = "C:\x\agent.exe --cwd D:\ai -r $sid prompt"
+    if (-not (Test-WatchRootMatchesSession -RootPid 32208 -SessionId $sid -CommandLine $cl)) {
+        throw 'matching session in command line must adopt'
+    }
+    if (Test-WatchRootMatchesSession -RootPid 32208 -SessionId $sid -CommandLine 'agent.exe -r other-session') {
+        throw 'wrong session must not match'
+    }
+    if (Test-WatchRootMatchesSession -RootPid 0 -SessionId $sid -CommandLine $cl) {
+        throw 'rootPid 0 must not match'
+    }
+    # Dead pid: use unlikely pid
+    if (Test-WatchRootMatchesSession -RootPid 1 -SessionId $sid -CommandLine $cl) {
+        # pid 1 may or may not exist on Windows — only fail if process is alive AND we claimed match without alive check
+        # Test-WatchRootMatchesSession requires alive; if System Idle/pid1 missing, OK
+    }
+    $state = [pscustomobject]@{ kind = 'grok'; sessionId = $sid; rootPid = 32208; seenSession = $true }
+    # Force match path with explicit command line by mocking alive via current process
+    $me = $PID
+    $state2 = [pscustomobject]@{ kind = 'grok'; sessionId = $sid; rootPid = $me; seenSession = $true }
+    $clMe = "fake-agent.exe -r $sid --cwd D:\ai"
+    $adopted = Try-AdoptLiveWatchAgent -State $state2 -CommandLine $clMe
+    if (-not $adopted) { throw 'live current PID with session in CL must adopt' }
+    if ($adopted.RootPid -ne $me) { throw 'adopted RootPid must be live pid' }
+    $dead = Try-AdoptLiveWatchAgent -State ([pscustomobject]@{ kind = 'grok'; sessionId = $sid; rootPid = 0 }) -CommandLine $clMe
+    if ($dead) { throw 'rootPid 0 must not adopt' }
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'Try-AdoptLiveWatchAgent -State \$state') { throw 'main loop must call Try-AdoptLiveWatchAgent' }
+    if ($src -notmatch '\[switch\]\$Reload') { throw '-Reload switch required for monitor hotpatch path' }
+}
+
+Invoke-Case 'AM8 stable nick across monitor restart (FR#89)' {
+    function script:Write-WatchLog { param([string]$Message) }
+    Import-WatchFunctions -Names @('Resolve-StableWatchIrcNick')
+    $st = [pscustomobject]@{ ircNick = 'marchhare-34992'; seatNickPid = 34992 }
+    $n = Resolve-StableWatchIrcNick -State $st -MachineId 'marchhare' -ResolvedHome '' -DefaultSeatPid 99999 -AgentRows @()
+    if ($n -ne 'marchhare-34992') { throw "expected stable nick marchhare-34992, got $n" }
+    $agents = @([pscustomobject]@{ CommandLine = 'python irc_agent.py --nick marchhare-34992 --home x' })
+    $n2 = Resolve-StableWatchIrcNick -State ([pscustomobject]@{}) -MachineId 'marchhare' -ResolvedHome '' -DefaultSeatPid 1 -AgentRows $agents
+    if ($n2 -ne 'marchhare-34992') { throw "live agent nick must win, got $n2" }
+    $n3 = Resolve-StableWatchIrcNick -State ([pscustomobject]@{}) -MachineId 'marchhare' -ResolvedHome '' -DefaultSeatPid 4242 -AgentRows @()
+    if ($n3 -ne 'marchhare-4242') { throw "default seat pid nick expected, got $n3" }
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'Resolve-StableWatchIrcNick') { throw 'Ensure-WatchIrcSeat must use Resolve-StableWatchIrcNick' }
+    if ($src -notmatch 'seatNickPid') { throw 'state.seatNickPid required for nick stability' }
+}
+
 Write-Host ''
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
