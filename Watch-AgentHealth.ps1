@@ -49,7 +49,14 @@ param(
     [string]$IrcHome,
     [int]$PollSeconds = 15,
     [int]$CrashBackoffSeconds = 20,
-    [string]$LogPath
+    [string]$LogPath,
+
+    # FR #99: rotate oversized sessions before resume (default 10 MB updates.jsonl)
+    [double]$SessionMaxUpdatesMb = 10,
+    # FR #99: hung agent -p with no CPU progress (minutes)
+    [double]$SessionHangMinutes = 3,
+    # Optional override for tests
+    [string]$GrokSessionsRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1195,18 +1202,278 @@ function Format-WatchWakeText {
     return $text
 }
 
+function Get-GrokSessionsRoot {
+    if ($GrokSessionsRoot) { return [IO.Path]::GetFullPath($GrokSessionsRoot) }
+    if ($env:BOB_GROK_SESSIONS_ROOT) { return [IO.Path]::GetFullPath($env:BOB_GROK_SESSIONS_ROOT) }
+    return Join-Path $env:USERPROFILE '.grok\sessions'
+}
+
+function Get-GrokCwdSessionBucket {
+    param([string]$WorkDir)
+    $full = [IO.Path]::GetFullPath($WorkDir)
+    # Grok stores sessions under URL-encoded cwd (e.g. D%3A%5Cai)
+    return [uri]::EscapeDataString($full)
+}
+
+function Resolve-GrokSessionDir {
+    param(
+        [string]$SessionId,
+        [string]$WorkDir,
+        [string]$SessionsRoot = ''
+    )
+    $sid = ([string]$SessionId).Trim()
+    if (-not $sid) { return $null }
+    $root = if ($SessionsRoot) { $SessionsRoot } else { Get-GrokSessionsRoot }
+    if (-not (Test-Path -LiteralPath $root)) { return $null }
+    $bucket = Join-Path $root (Get-GrokCwdSessionBucket -WorkDir $WorkDir)
+    $direct = Join-Path $bucket $sid
+    if (Test-Path -LiteralPath $direct) { return [IO.Path]::GetFullPath($direct) }
+    # Fallback: search one level under sessions root
+    foreach ($dir in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+        $cand = Join-Path $dir.FullName $sid
+        if (Test-Path -LiteralPath $cand) { return [IO.Path]::GetFullPath($cand) }
+    }
+    return $null
+}
+
+function Get-WatchSessionSizeInfo {
+    param([string]$SessionDir)
+    $info = [pscustomobject]@{
+        SessionDir     = $SessionDir
+        UpdatesBytes   = [int64]0
+        FolderBytes    = [int64]0
+        UpdatesPath    = ''
+        Exists         = $false
+    }
+    if (-not $SessionDir -or -not (Test-Path -LiteralPath $SessionDir)) { return $info }
+    $info.Exists = $true
+    $updates = Join-Path $SessionDir 'updates.jsonl'
+    $info.UpdatesPath = $updates
+    if (Test-Path -LiteralPath $updates) {
+        $info.UpdatesBytes = [int64](Get-Item -LiteralPath $updates).Length
+    }
+    $sum = [int64]0
+    foreach ($f in @(Get-ChildItem -LiteralPath $SessionDir -File -Recurse -ErrorAction SilentlyContinue)) {
+        $sum += [int64]$f.Length
+    }
+    $info.FolderBytes = $sum
+    return $info
+}
+
+function Test-WatchSessionNeedsRotation {
+    param(
+        $SizeInfo,
+        [double]$MaxUpdatesMb = 10
+    )
+    if (-not $SizeInfo -or -not $SizeInfo.Exists) { return $false }
+    $limit = [int64]([Math]::Max(1.0, $MaxUpdatesMb) * 1MB)
+    if ([int64]$SizeInfo.UpdatesBytes -ge $limit) { return $true }
+    # whole folder > 3x updates limit is also oversized
+    if ([int64]$SizeInfo.FolderBytes -ge (3 * $limit)) { return $true }
+    return $false
+}
+
+function Archive-WatchSessionDir {
+    param(
+        [string]$SessionDir,
+        [string]$Reason = 'oversized'
+    )
+    if (-not $SessionDir -or -not (Test-Path -LiteralPath $SessionDir)) {
+        return [pscustomobject]@{ ok = $false; archivePath = ''; reason = 'missing' }
+    }
+    $parent = Split-Path -Parent $SessionDir
+    $leaf = Split-Path -Leaf $SessionDir
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $archRoot = Join-Path $parent ('_archive-{0}-{1}' -f $stamp, ($Reason -replace '[^\w\-]', ''))
+    New-Item -ItemType Directory -Force -Path $archRoot | Out-Null
+    $dest = Join-Path $archRoot $leaf
+    # Move (never delete)
+    Move-Item -LiteralPath $SessionDir -Destination $dest -Force
+    return [pscustomobject]@{ ok = $true; archivePath = $dest; reason = $Reason }
+}
+
+function New-WatchSessionId {
+    return [guid]::NewGuid().ToString()
+}
+
+function Write-WatchSessionHealthReport {
+    param(
+        [string]$Kind,
+        [string]$Event,
+        [hashtable]$Fields
+    )
+    # FR #99: digest webhook only (no IRC chatter). Best-effort; never throws.
+    try {
+        $payload = @{
+            op        = 'merge'
+            machine   = $(if ($env:BOB_MACHINE_ID) { $env:BOB_MACHINE_ID.ToLowerInvariant() } else { $env:COMPUTERNAME.ToLowerInvariant() })
+            lastSeen  = (Get-Date).ToUniversalTime().ToString('o')
+            working_on = ('watch-seat {0}: {1}' -f $Kind, $Event)
+            status    = $(if ($Event -match 'unhealthy') { 'I am degraded' } else { 'I am online' })
+            online    = $true
+            watch_session = $Fields
+        }
+        $url = $env:BOB_REPORT_URL
+        if (-not $url) { $url = 'http://127.0.0.1:19781/bob/v1/report' }
+        $body = ($payload | ConvertTo-Json -Depth 6 -Compress)
+        $headers = @{ 'Content-Type' = 'application/json' }
+        $sec = $env:BOB_CALLBACK_SECRET
+        if (-not $sec) { $sec = $env:BOB_SECRET }
+        if ($sec) { $headers['X-Bob-Secret'] = $sec }
+        Invoke-WebRequest -Uri $url -Method POST -Body $body -Headers $headers -UseBasicParsing -TimeoutSec 3 | Out-Null
+    }
+    catch { }
+}
+
+function Ensure-WatchSessionBeforeResume {
+    param(
+        $State,
+        [string]$WorkDir,
+        [string]$Kind = 'grok'
+    )
+    $sid = [string]$State.sessionId
+    if (-not $sid) {
+        $State.sessionId = New-WatchSessionId
+        $State.seenSession = $false
+        return $State
+    }
+    $dir = Resolve-GrokSessionDir -SessionId $sid -WorkDir $WorkDir
+    if (-not $dir) { return $State }
+    $info = Get-WatchSessionSizeInfo -SessionDir $dir
+    $maxMb = if ($SessionMaxUpdatesMb -gt 0) { $SessionMaxUpdatesMb } else { 10 }
+    if (-not (Test-WatchSessionNeedsRotation -SizeInfo $info -MaxUpdatesMb $maxMb)) {
+        return $State
+    }
+    $arch = Archive-WatchSessionDir -SessionDir $dir -Reason 'oversized'
+    $old = $sid
+    $State.sessionId = New-WatchSessionId
+    $State.seenSession = $false
+    if ($State.PSObject.Properties.Name -contains 'cursorSessionValid') {
+        try { $State.PSObject.Properties.Remove('cursorSessionValid') } catch { }
+    }
+    $State | Add-Member -NotePropertyName 'lastSessionRotate' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'oversized' -Force
+    Write-WatchLog ("session rotate oversized old={0} new={1} updatesMb={2:N1} archive={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.archivePath)
+    Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized' -Fields @{
+        old_session = $old
+        new_session = $State.sessionId
+        updates_mb  = [Math]::Round(($info.UpdatesBytes / 1MB), 2)
+        archive     = $arch.archivePath
+    }
+    return $State
+}
+
+function Test-WatchForwardBusy {
+    # Max one pending agent -p per seat (FR #99).
+    param($State)
+    if ($State.PSObject.Properties.Name -contains 'pendingForwardPid') {
+        $fwdPid = 0
+        try { $fwdPid = [int]$State.pendingForwardPid } catch { $fwdPid = 0 }
+        if ($fwdPid -gt 0 -and (Test-WatchProcessAlive -ProcessId $fwdPid)) {
+            return $true
+        }
+    }
+    $sid = [string]$State.sessionId
+    if ($sid -and (Test-CursorAgentForwardBusy -SessionId $sid)) { return $true }
+    return $false
+}
+
+function Get-ProcessCpuSeconds {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) { return $null }
+    try {
+        $p = Get-Process -Id $ProcessId -ErrorAction Stop
+        return [double]$p.TotalProcessorTime.TotalSeconds
+    }
+    catch { return $null }
+}
+
+function Update-WatchPendingForwardHang {
+    param($State)
+    # FR #99: if pending -p makes no CPU progress for SessionHangMinutes, kill once, rotate, redeliver once.
+    if (-not ($State.PSObject.Properties.Name -contains 'pendingForwardPid')) { return $State }
+    $fwdPid = 0
+    try { $fwdPid = [int]$State.pendingForwardPid } catch { return $State }
+    if ($fwdPid -le 0) { return $State }
+    if (-not (Test-WatchProcessAlive -ProcessId $fwdPid)) {
+        $State.pendingForwardPid = 0
+        return $State
+    }
+    $cpu = Get-ProcessCpuSeconds -ProcessId $fwdPid
+    $now = Get-Date
+    if (-not ($State.PSObject.Properties.Name -contains 'pendingForwardCpu')) {
+        $State | Add-Member -NotePropertyName 'pendingForwardCpu' -NotePropertyValue $cpu -Force
+        $State | Add-Member -NotePropertyName 'pendingForwardCpuAt' -NotePropertyValue $now -Force
+        return $State
+    }
+    $prevCpu = $State.pendingForwardCpu
+    $prevAt = $State.pendingForwardCpuAt
+    if ($null -eq $cpu -or $null -eq $prevCpu) { return $State }
+    if ([double]$cpu -gt ([double]$prevCpu + 0.05)) {
+        $State.pendingForwardCpu = $cpu
+        $State.pendingForwardCpuAt = $now
+        return $State
+    }
+    $hangMin = if ($SessionHangMinutes -gt 0) { $SessionHangMinutes } else { 3 }
+    $elapsed = ($now - [datetime]$prevAt).TotalMinutes
+    if ($elapsed -lt $hangMin) { return $State }
+
+    # Hung: stop once, rotate session, redeliver pending FROM once
+    Write-WatchLog ("forward hung no-cpu pid={0} elapsedMin={1:N1} - stop+rotate once" -f $fwdPid, $elapsed)
+    try { Stop-Process -Id $fwdPid -Force -ErrorAction SilentlyContinue } catch { }
+    $State.pendingForwardPid = 0
+    $oldSid = [string]$State.sessionId
+    $cwdFull = [IO.Path]::GetFullPath($Cwd)
+    $dir = Resolve-GrokSessionDir -SessionId $oldSid -WorkDir $cwdFull
+    if ($dir) { [void](Archive-WatchSessionDir -SessionDir $dir -Reason 'hung') }
+    $State.sessionId = New-WatchSessionId
+    $State.seenSession = $false
+    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'hung' -Force
+    Write-WatchSessionHealthReport -Kind $(if ($Grok) { 'grok' } else { 'cursor' }) -Event 'session-rotate-hung' -Fields @{
+        old_session = $oldSid
+        new_session = $State.sessionId
+        hung_pid    = $fwdPid
+    }
+    $pendingLine = ''
+    if ($State.PSObject.Properties.Name -contains 'pendingForwardLine') {
+        $pendingLine = [string]$State.pendingForwardLine
+    }
+    $alreadyRetried = $false
+    if ($State.PSObject.Properties.Name -contains 'pendingForwardRetried' -and [bool]$State.pendingForwardRetried) {
+        $alreadyRetried = $true
+    }
+    if ($pendingLine -and -not $alreadyRetried) {
+        $State | Add-Member -NotePropertyName 'pendingForwardRetried' -NotePropertyValue $true -Force
+        $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue '' -Force
+        Write-WatchLog 'forward hung: re-deliver pending FROM once after rotate'
+        return (Send-IrcLineToSession -State $State -Line $pendingLine)
+    }
+    if ($alreadyRetried) {
+        $State | Add-Member -NotePropertyName 'seatUnhealthy' -NotePropertyValue $true -Force
+        Write-WatchLog 'forward hung: second failure - seat unhealthy; stop queueing'
+        Write-WatchSessionHealthReport -Kind $(if ($Grok) { 'grok' } else { 'cursor' }) -Event 'seat-unhealthy-hung' -Fields @{
+            session = $State.sessionId
+        }
+    }
+    return $State
+}
+
 function Send-IrcLineToSession {
     param(
         $State,
         [string]$Line
     )
     try {
+    if ($State.PSObject.Properties.Name -contains 'seatUnhealthy' -and [bool]$State.seatUnhealthy) {
+        Write-WatchLog ('forward skipped (seat unhealthy) {0}' -f $Line.Substring(0, [Math]::Min(80, $Line.Length)))
+        return $State
+    }
     if ($State.PSObject.Properties.Name -contains 'lastForwardLine' -and [string]$State.lastForwardLine -eq $Line) {
         return $State
     }
     $trim = $Line.Trim()
     if ($trim -match '^FROM ') {
-        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself â€” never forward to agent
+        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself — never forward to agent
         # (busy seats still answer so fleet knows they are responding).
         $parts = Get-IrcFromParts -Line $trim
         if ($parts) {
@@ -1230,17 +1497,37 @@ function Send-IrcLineToSession {
         Write-WatchLog ('listen {0}' -f $trim.Substring(0, [Math]::Min(120, $trim.Length)))
     }
     if (Test-DropIrcLine -Line $Line) { return $State }
+
+    # FR #99: hang check on existing pending run before queueing another
+    $State = Update-WatchPendingForwardHang -State $State
+    if ($State.PSObject.Properties.Name -contains 'seatUnhealthy' -and [bool]$State.seatUnhealthy) {
+        return $State
+    }
+    if (Test-WatchForwardBusy -State $State) {
+        Write-WatchLog ('forward skipped (max 1 pending agent -p) session={0}' -f $State.sessionId)
+        return $State
+    }
+
     $inbox = Join-Path $script:StateDir 'agent-inbox.txt'
     Add-Content -LiteralPath $inbox -Value $Line -Encoding utf8
     $cwdFull = [IO.Path]::GetFullPath($Cwd)
     $text = Format-WatchWakeText -Line $Line -OurNick (Get-WatchSeatNick -State $State)
+
+    # FR #99: rotate oversized session before resume
+    $State = Ensure-WatchSessionBeforeResume -State $State -WorkDir $cwdFull -Kind $(if ($Grok) { 'grok' } else { 'cursor' })
     $sid = [string]$State.sessionId
+
     if ($Grok) {
         $exe = Get-GrokAgentPath
         $args = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull, '-r', $sid, '-p', $text)
-        Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden | Out-Null
+        $proc = Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden -PassThru
+        $State | Add-Member -NotePropertyName 'pendingForwardPid' -NotePropertyValue ([int]$proc.Id) -Force
+        $State | Add-Member -NotePropertyName 'pendingForwardLine' -NotePropertyValue $Line -Force
+        $State | Add-Member -NotePropertyName 'pendingForwardCpu' -NotePropertyValue (Get-ProcessCpuSeconds -ProcessId ([int]$proc.Id)) -Force
+        $State | Add-Member -NotePropertyName 'pendingForwardCpuAt' -NotePropertyValue (Get-Date) -Force
+        $State | Add-Member -NotePropertyName 'pendingForwardRetried' -NotePropertyValue $false -Force
         $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
-        Write-WatchLog ('forward grok session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
+        Write-WatchLog ('forward grok session={0} pid={1} {2}' -f $sid, $proc.Id, $text.Substring(0, [Math]::Min(80, $text.Length)))
         return $State
     }
     $agentCmd = Get-CursorAgentCmd
@@ -1269,9 +1556,14 @@ function Send-IrcLineToSession {
     ) -join [Environment]::NewLine
     [IO.File]::WriteAllText($launch, $body, $utf8)
     $psExe = (Get-Command powershell.exe).Source
-    Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden | Out-Null
+    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden -PassThru
+    $State | Add-Member -NotePropertyName 'pendingForwardPid' -NotePropertyValue ([int]$proc.Id) -Force
+    $State | Add-Member -NotePropertyName 'pendingForwardLine' -NotePropertyValue $Line -Force
+    $State | Add-Member -NotePropertyName 'pendingForwardCpu' -NotePropertyValue (Get-ProcessCpuSeconds -ProcessId ([int]$proc.Id)) -Force
+    $State | Add-Member -NotePropertyName 'pendingForwardCpuAt' -NotePropertyValue (Get-Date) -Force
+    $State | Add-Member -NotePropertyName 'pendingForwardRetried' -NotePropertyValue $false -Force
     $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
-    Write-WatchLog ('forward cursor session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
+    Write-WatchLog ('forward cursor session={0} pid={1} {2}' -f $sid, $proc.Id, $text.Substring(0, [Math]::Min(80, $text.Length)))
     return $State
     }
     catch {
@@ -1793,6 +2085,8 @@ try {
             }
         }
 
+        # FR #99: detect hung pending agent -p (no CPU) between IRC tails
+        $state = Update-WatchPendingForwardHang -State $state
         $state = Sync-IrcForward -State $state
         Write-WatchState -Obj $state
         Start-Sleep -Seconds $PollSeconds

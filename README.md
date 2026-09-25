@@ -44,6 +44,12 @@ Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.
 
 Session state: `%USERPROFILE%\.grok\agent-health\state-grok.json` or `state-cursor.json`.
 
+## Session rotation (FR #99)
+
+Before each `agent -p` resume, if the Grok session `updates.jsonl` exceeds **10 MB** (configurable `-SessionMaxUpdatesMb`), the monitor **archives** the session folder under `_archive-<date>-oversized\` (move, **never delete**), starts a new session id, and logs the rotation.
+
+If a pending `agent -p` shows **no CPU progress** for **3 minutes** (configurable `-SessionHangMinutes`) with no completion, the monitor stops that PID, archives/rotates once, and **re-delivers the pending FROM once**. A second hang marks the seat unhealthy and stops queueing further runs. At most **one** pending `-p` per seat.
+
 ## Repo docs
 
 | Document | Purpose |

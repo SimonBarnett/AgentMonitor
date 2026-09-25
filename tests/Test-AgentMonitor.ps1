@@ -193,6 +193,130 @@ Invoke-Case 'AM9 FR89 docs reload playbook' {
     if ($src -notmatch 'Resolve-StableWatchIrcNick') { throw 'script must stabilize nick' }
 }
 
+Invoke-Case 'AM99 oversized session rotates archive never delete (FR#99)' {
+    function script:Write-WatchLog { param([string]$Message) }
+    function script:Write-WatchSessionHealthReport { param($Kind, $Event, $Fields) }
+    Import-WatchFunctions -Names @(
+        'Get-GrokCwdSessionBucket', 'Resolve-GrokSessionDir', 'Get-WatchSessionSizeInfo',
+        'Test-WatchSessionNeedsRotation', 'Archive-WatchSessionDir', 'Ensure-WatchSessionBeforeResume',
+        'New-WatchSessionId', 'Get-GrokSessionsRoot'
+    )
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('am99-' + [guid]::NewGuid().ToString('N'))
+    $cwd = Join-Path $root 'work'
+    New-Item -ItemType Directory -Force -Path $cwd | Out-Null
+    $sessions = Join-Path $root 'sessions'
+    $bucket = Join-Path $sessions (Get-GrokCwdSessionBucket -WorkDir $cwd)
+    $sid = '972c6563-d6ac-4d95-9a7d-0ec509d158a6'
+    $sess = Join-Path $bucket $sid
+    New-Item -ItemType Directory -Force -Path $sess | Out-Null
+    # 11 MB fake updates.jsonl (> 10 MB default)
+    $updates = Join-Path $sess 'updates.jsonl'
+    $fs = [IO.File]::Open($updates, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+    try {
+        $chunk = New-Object byte[] (1MB)
+        for ($i = 0; $i -lt 11; $i++) { $fs.Write($chunk, 0, $chunk.Length) }
+    }
+    finally { $fs.Dispose() }
+    $info = Get-WatchSessionSizeInfo -SessionDir $sess
+    if (-not (Test-WatchSessionNeedsRotation -SizeInfo $info -MaxUpdatesMb 10)) {
+        throw "11MB updates should need rotation (bytes=$($info.UpdatesBytes))"
+    }
+    $script:GrokSessionsRoot = $sessions
+    $script:SessionMaxUpdatesMb = 10
+    # Resolve needs Get-GrokSessionsRoot which uses $GrokSessionsRoot param - bind script var used by function
+    $script:GrokSessionsRoot = $sessions
+    # Patch via env
+    $env:BOB_GROK_SESSIONS_ROOT = $sessions
+    $st = [pscustomobject]@{ sessionId = $sid; seenSession = $true }
+    $st2 = Ensure-WatchSessionBeforeResume -State $st -WorkDir $cwd -Kind 'grok'
+    if ($st2.sessionId -eq $sid) { throw 'session id must change after oversized rotate' }
+    if (Test-Path -LiteralPath $sess) { throw 'old session dir must be moved (archived), not left in place' }
+    $arch = @(Get-ChildItem -LiteralPath $bucket -Directory -Filter '_archive-*' -ErrorAction SilentlyContinue)
+    if ($arch.Count -lt 1) {
+        # archive is sibling under bucket parent
+        $arch = @(Get-ChildItem -LiteralPath $bucket -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '_archive-*' })
+    }
+    $found = $false
+    # Archive-WatchSessionDir moves session into _archive-*/sid under parent of session (bucket)
+    $archDirs = @(Get-ChildItem -LiteralPath $bucket -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '_archive-*' })
+    if ($archDirs.Count -lt 1) { throw 'archive folder missing under session bucket' }
+    $moved = Join-Path $archDirs[0].FullName $sid
+    if (-not (Test-Path -LiteralPath $moved)) { throw "archived session missing at $moved" }
+    $movedUpdates = Join-Path $moved 'updates.jsonl'
+    if (-not (Test-Path -LiteralPath $movedUpdates)) { throw 'archive must keep updates.jsonl (never delete)' }
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\BOB_GROK_SESSIONS_ROOT -ErrorAction SilentlyContinue
+}
+
+Invoke-Case 'AM99b hung no-cpu forward detects and rotates once (FR#99)' {
+    function script:Write-WatchLog { param([string]$Message) }
+    function script:Write-WatchSessionHealthReport { param($Kind, $Event, $Fields) }
+    function script:Test-WatchProcessAlive { param([int]$ProcessId) return ($ProcessId -eq 4242) }
+    function script:Get-ProcessCpuSeconds { param([int]$ProcessId) return 1.0 }  # frozen CPU
+    function script:Send-IrcLineToSession {
+        param($State, [string]$Line)
+        $State | Add-Member -NotePropertyName 'redelivered' -NotePropertyValue $Line -Force
+        return $State
+    }
+    Import-WatchFunctions -Names @('Update-WatchPendingForwardHang', 'Archive-WatchSessionDir', 'New-WatchSessionId')
+    # Provide Resolve-GrokSessionDir as no-op missing dir
+    function script:Resolve-GrokSessionDir { param($SessionId, $WorkDir, $SessionsRoot = '') return $null }
+    $script:SessionHangMinutes = 0.001  # tiny threshold for test
+    $script:Grok = $true
+    $script:Cwd = $env:TEMP
+    $st = [pscustomobject]@{
+        sessionId             = 'old-session-id'
+        seenSession           = $true
+        pendingForwardPid     = 4242
+        pendingForwardCpu     = 1.0
+        pendingForwardCpuAt   = (Get-Date).AddMinutes(-10)
+        pendingForwardLine    = 'FROM bob-x #x hi'
+        pendingForwardRetried = $false
+    }
+    $out = Update-WatchPendingForwardHang -State $st
+    if ($out.sessionId -eq 'old-session-id') { throw 'hung path must rotate session id' }
+    if (-not $out.redelivered) { throw 'must redeliver pending FROM once after hang rotate' }
+    # Second hang after retry => unhealthy
+    $st2 = [pscustomobject]@{
+        sessionId             = 's2'
+        seenSession           = $true
+        pendingForwardPid     = 4242
+        pendingForwardCpu     = 1.0
+        pendingForwardCpuAt   = (Get-Date).AddMinutes(-10)
+        pendingForwardLine    = 'FROM bob-x #x hi2'
+        pendingForwardRetried = $true
+    }
+    $out2 = Update-WatchPendingForwardHang -State $st2
+    if (-not [bool]$out2.seatUnhealthy) { throw 'second hang must mark seatUnhealthy' }
+}
+
+Invoke-Case 'AM99c max one pending forward busy (FR#99)' {
+    function script:Write-WatchLog { param([string]$Message) }
+    function script:Test-WatchProcessAlive { param([int]$ProcessId) return ($ProcessId -eq 99) }
+    function script:Test-CursorAgentForwardBusy { param([string]$SessionId) return $false }
+    Import-WatchFunctions -Names @('Test-WatchForwardBusy')
+    $busy = Test-WatchForwardBusy -State ([pscustomobject]@{ pendingForwardPid = 99; sessionId = 'x' })
+    if (-not $busy) { throw 'live pending pid must be busy' }
+    $free = Test-WatchForwardBusy -State ([pscustomobject]@{ pendingForwardPid = 0; sessionId = 'x' })
+    if ($free) { throw 'no pending should not be busy' }
+}
+
+Invoke-Case 'AM99d source documents FR99 rotation' {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'Ensure-WatchSessionBeforeResume') { throw 'missing Ensure-WatchSessionBeforeResume' }
+    if ($src -notmatch 'Archive-WatchSessionDir') { throw 'missing Archive-WatchSessionDir' }
+    if ($src -notmatch 'Update-WatchPendingForwardHang') { throw 'missing hang detector' }
+    if ($src -notmatch 'SessionMaxUpdatesMb') { throw 'missing SessionMaxUpdatesMb param' }
+    if ($src -notmatch 'never delete' -or $src -notmatch 'Move-Item') {
+        # Move-Item is the archive path
+        if ($src -notmatch 'Move-Item') { throw 'archive must Move-Item not delete' }
+    }
+    $readme = Get-Content -LiteralPath (Join-Path $RepoRoot 'README.md') -Raw
+    if ($readme -notmatch 'FR #99|oversized|session rotate') {
+        throw 'README should mention session rotation FR #99'
+    }
+}
+
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
 exit 0
