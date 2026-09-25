@@ -180,6 +180,19 @@ Invoke-Case 'AM8 stable nick across monitor restart (FR#89)' {
 }
 
 Write-Host ''
+
+Invoke-Case 'AM9 FR89 docs reload playbook' {
+    $doc = Join-Path $RepoRoot 'docs\monitor-reload-fr89.md'
+    if (-not (Test-Path -LiteralPath $doc)) { throw 'docs/monitor-reload-fr89.md required' }
+    $body = Get-Content -LiteralPath $doc -Raw
+    if ($body -notmatch '-Reload') { throw 'docs must document -Reload' }
+    if ($body -notmatch 'adopt') { throw 'docs must document adopt' }
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch '\[switch\]\$Reload') { throw 'script must expose -Reload' }
+    if ($src -notmatch 'Try-AdoptLiveWatchAgent') { throw 'script must adopt live agent' }
+    if ($src -notmatch 'Resolve-StableWatchIrcNick') { throw 'script must stabilize nick' }
+}
+
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
 exit 0
