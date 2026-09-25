@@ -28,8 +28,8 @@ how you get IRC. Prefer that wake path (skill `watch-agent-health` /
 
 When the seat was launched from the Bob Fleet tray **Agents** menu (or
 Watch-AgentHealth), the **monitor** already started `irc_agent` + `irc_listen`
-on this home and JOINed **all seat channels** (`#bobiverse`, `#{machine}`,
-`#agentic_irc`). You respond on the **target channel** in each forwarded
+on this home and JOINed **its own `#{machine}` ONLY** (CAST IRON 2026-09-25:
+workers never join `#bobiverse` or `#agentic_irc`). You respond on the **target channel** in each forwarded
 `FROM` via `outbox.txt`.
 
 ## Do

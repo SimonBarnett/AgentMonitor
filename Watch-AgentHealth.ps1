@@ -5,7 +5,7 @@
 .DESCRIPTION
   Simon #bobiverse 2026-09-22: --grok / --cursor. Persist session id (resume, no full skill reload).
   CAST IRON (Simon 2026-09-23): Ensure-WatchIrcSeat starts irc_agent + irc_listen on the watch
-  home and JOINs #bobiverse, #{machine}, #agentic_irc (systray Agents / every launch).
+  home and JOINs its own #{machine} ONLY (never #bobiverse / #agentic_irc; CAST IRON 2026-09-25).
   Monitor tails $IrcHome/irc.log and forwards each PRIVMSG as FROM into the agent.
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
@@ -827,10 +827,19 @@ function Clear-WatchStaleQuitRequest {
     }
 }
 
+function Get-WatchSeatChannels {
+    # CAST IRON (Simon 2026-09-25): worker / watch seats JOIN their own #{machine} ONLY.
+    # Never #bobiverse (bob-{machine} ears, Jeeves and humans only) and never #agentic_irc or extras.
+    param([string]$MachineId)
+    $m = ([string]$MachineId).Trim().TrimStart('#').ToLowerInvariant()
+    if (-not $m) { $m = ([string]$env:COMPUTERNAME).Trim().ToLowerInvariant() }
+    return ('#' + $m)
+}
+
 function Ensure-WatchIrcSeat {
     # CAST IRON (Simon 2026-09-23): systray / Watch-AgentHealth launch MUST connect
-    # irc_agent + irc_listen on this home and JOIN all seat channels
-    # (#bobiverse, #{machine}, #agentic_irc). Monitor then forwards FROM.
+    # irc_agent + irc_listen on this home and JOIN its own #{machine} ONLY
+    # (CAST IRON 2026-09-25: workers never join #bobiverse / #agentic_irc). Monitor then forwards FROM.
     param($State)
     $seatHome = [string]$State.ircHome
     if (-not $seatHome) { return $State }
@@ -886,7 +895,7 @@ function Ensure-WatchIrcSeat {
         $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue $seatPid -Force
     }
     $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
-    $channels = ('#bobiverse,#{0},#agentic_irc' -f $mid)
+    $channels = Get-WatchSeatChannels -MachineId $mid
     $env:AGENTIC_IRC_PASSWORD = (Get-Content -LiteralPath $pwFile -Raw).Trim()
     $env:AGENTIC_IRC_DEBUG = '1'
     $env:AGENTIC_IRC_SEAT_PID = "$seatPid"
@@ -994,7 +1003,7 @@ function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
-        "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (all seat channels)."
+        "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (own #{machine} channel only)."
         'You are NOT on IRC by reading irc.log or counting processes â€” you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
@@ -1007,7 +1016,7 @@ function Get-AgentPrompt {
         'CAST IRON: you are not "on IRC" by probing irc.log / processes. IRC data arrives only as monitor-forwarded FROM lines. Prefer that wake path; do not arm in-session ^FROM TSR.'
         'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types here. Do not idle-wait in chat for the monitor; finish the turn after acting.'
         'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc; AgentMonitor playbooks stay in this repo.'
-        "IRC home: $ResolvedIrcHome. Seat JOINs #bobiverse, #{machine}, #agentic_irc. Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
+        "IRC home: $ResolvedIrcHome. Seat JOINs its own #{machine} ONLY (never #bobiverse or #agentic_irc; do not post there). Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
         "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you (ASSIGN = your job: ACK on that channel, then do it)."
@@ -1718,7 +1727,7 @@ try {
 
     while ($true) {
         try {
-        # Keep IRC up while the seat is live (agent+listen on all channels).
+        # Keep IRC up while the seat is live (agent+listen on own #{machine} only).
         # Cursor print-only after TUI exit: do not reconnect (Disconnect already ran).
         $skipIrc = $Cursor -and (Test-CursorPrintOnlyMode -State $state)
         if (-not $skipIrc) {
