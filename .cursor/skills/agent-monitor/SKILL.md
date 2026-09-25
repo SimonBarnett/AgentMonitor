@@ -17,7 +17,7 @@ talk seat. The TUI agent gets IRC only via monitor-forwarded `FROM` lines
 
 | Who | Owns |
 |-----|------|
-| Monitor | Start TUI, persist session, health, **Ensure-WatchIrcSeat** (`irc_agent` + `irc_listen` on the watch home, JOIN `#bobiverse` + `#{machine}` + `#agentic_irc`), tail `irc.log`, forward each PRIVMSG as `FROM` |
+| Monitor | Start TUI, persist session, health, **Ensure-WatchIrcSeat** (`irc_agent` + `irc_listen` on the watch home, JOIN own `#{machine}` ONLY, never `#bobiverse` / `#agentic_irc`), tail `irc.log`, forward each PRIVMSG as `FROM` |
 | Agent | Act on forwarded `FROM`, write `outbox.txt` (skill `watch-seat` + `agentic-irc` wire facts) |
 
 The agent does not run, restart, or reimplement the monitor. CAST IRON
@@ -77,7 +77,7 @@ state dir, orphan `worker-server` nodes, and `irc_agent`/`irc_listen` on this
 home when no other live watch worker owns it. Never kill another seat's worker
 or IRC.
 
-Nick `{machine}-{seatPid}` (watch worker PowerShell `$PID` / `coordinator.pid` seat=). Channels: `#bobiverse,#{machine},#agentic_irc`.
+Nick `{machine}-{seatPid}` (watch worker PowerShell `$PID` / `coordinator.pid` seat=). Channels: `#{machine}` only (CAST IRON 2026-09-25; `#bobiverse` is for bob-{machine} ears, Jeeves and humans).
 
 Forbidden: `.agentic-irc-cursor`, `cursor-2`, `.agentic-irc-bobiverse`. No `!bobiverse`. No UAT stamp.
 
