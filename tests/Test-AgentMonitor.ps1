@@ -104,6 +104,31 @@ Invoke-Case 'AM5 Send-IrcLineToSession uses Format-WatchWakeText + prompt names 
     if ($src -notmatch 'Your IRC nick is nick= in') { throw 'seed prompt must tell the seat where its nick is' }
 }
 
+Invoke-Case 'AM6 mrb hostile address edges (FR#88)' {
+    Import-WatchFunctions -Names @('Test-WatchIrcAddressedToNick', 'Format-WatchWakeText', 'Get-WatchSeatNick')
+    # Substring collision: shorter nick must not match longer
+    if (Test-WatchIrcAddressedToNick -Text 'marchhare-349920: x' -OurNick 'marchhare-34992') {
+        throw 'must not match longer nick with same prefix'
+    }
+    # Bare channel chatter mentioning nick mid-line is NOT address
+    if (Test-WatchIrcAddressedToNick -Text 'see marchhare-34992 later' -OurNick 'marchhare-34992') {
+        throw 'mid-line mention must not count as address'
+    }
+    # Whitespace-only / empty nick
+    if (Test-WatchIrcAddressedToNick -Text 'marchhare-34992: x' -OurNick '   ') {
+        throw 'blank OurNick must be false'
+    }
+    # FOR YOU must name outbox target channel from FROM parts
+    $line = 'FROM bob-marchhare #agentic_irc marchhare-34992: ping'
+    $w = Format-WatchWakeText -Line $line -OurNick 'marchhare-34992'
+    if ($w -notmatch 'outbox to #agentic_irc') { throw "channel target wrong: $w" }
+    # Seed / nick resolution path exists
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'function Get-WatchSeatNick') { throw 'Get-WatchSeatNick required' }
+    if ($src -notmatch 'coordinator\.pid') { throw 'nick source coordinator.pid must be documented in script' }
+    if ($src -notmatch 'FOR YOU \(your IRC nick is') { throw 'FOR YOU format string required' }
+}
+
 Write-Host ''
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
