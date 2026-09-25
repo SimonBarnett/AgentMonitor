@@ -1508,7 +1508,8 @@ function Stop-WatchedTree {
 function Test-DropIrcLine {
     param([string]$Line)
     if ($Line -notmatch '^FROM ') { return $true }
-    if ($Line -match ' POINT | DIGEST | AGPK | SEAL ') { return $true }
+    # Protocol tokens are UPPERCASE; -cmatch so chat words (digest, point, seal) still forward.
+    if ($Line -cmatch ' POINT | DIGEST | AGPK | SEAL ') { return $true }
     # Do NOT drop chat PING here â€” Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false

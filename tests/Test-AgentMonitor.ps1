@@ -193,6 +193,17 @@ Invoke-Case 'AM9 FR89 docs reload playbook' {
     if ($src -notmatch 'Resolve-StableWatchIrcNick') { throw 'script must stabilize nick' }
 }
 
+Invoke-Case 'AM10 drop filter is case-sensitive for protocol tokens (ASSIGN with digest dropped)' {
+    Import-WatchFunctions -Names @('Test-DropIrcLine')
+    $assign = 'FROM bob-marchhare #marchhare marchhare-34992: ASSIGN FR SimonBarnett/agentic_irc #211 | fire the digest webhook on ACK; seal the point; ACK here'
+    if (Test-DropIrcLine -Line $assign) { throw 'chat ASSIGN mentioning digest/seal/point must be forwarded' }
+    foreach ($p in @('FROM bob-x #bobiverse POINT v1 abc', 'FROM bob-x #bobiverse DIGEST v1 abc', 'FROM bob-x #bobiverse AGPK v1 abc', 'FROM bob-x #bobiverse SEAL v2 abc')) {
+        if (-not (Test-DropIrcLine -Line $p)) { throw "protocol line must still drop: $p" }
+    }
+    if (-not (Test-DropIrcLine -Line 'FROM bob-x #marchhare marchhare is busy.')) { throw 'is busy. still drops' }
+    if (-not (Test-DropIrcLine -Line ':server 001 x')) { throw 'non-FROM still drops' }
+}
+
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
 exit 0
