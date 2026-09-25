@@ -43,7 +43,10 @@ param(
     [string]$IrcHome,
     [int]$PollSeconds = 15,
     [int]$CrashBackoffSeconds = 20,
-    [string]$LogPath
+    [string]$LogPath,
+
+    # FR #89: restart this monitor only; adopt live agent tree + keep seat nick (no second TUI).
+    [switch]$Reload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -678,16 +681,122 @@ function Get-WatchIrcListenRows {
         })
 }
 
+function Test-WatchPidAlive {
+    param(
+        [int]$ProcessId,
+        [scriptblock]$Probe
+    )
+    if ($ProcessId -le 0) { return $false }
+    if ($Probe) { return [bool](& $Probe $ProcessId) }
+    return [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
+function Test-WatchCommandLineMatchesSession {
+    param(
+        [string]$CommandLine,
+        [string]$SessionId,
+        [ValidateSet('grok', 'cursor')]
+        [string]$Kind
+    )
+    if (-not $CommandLine -or -not $SessionId) { return $false }
+    if ($CommandLine -notmatch [regex]::Escape($SessionId)) { return $false }
+    if ($Kind -eq 'grok') {
+        return $CommandLine -match '(?i)grok(\.exe)?'
+    }
+    return $CommandLine -match '(?i)agent(\.cmd|\.exe)?'
+}
+
+function Get-WatchSeatPidFromAgentCommandLine {
+    # FR #89: keep nick stable across monitor restart while irc_agent is still live.
+    param([string]$CommandLine)
+    if (-not $CommandLine) { return 0 }
+    if ($CommandLine -match '--nick\s+[''"]?([^\s''"]+)') {
+        $nick = $Matches[1]
+        if ($nick -match '-(\d+)$') {
+            $s = [int]$Matches[1]
+            if ($s -gt 0) { return $s }
+        }
+    }
+    return 0
+}
+
+function Test-WatchRootMatchesSession {
+    param(
+        [int]$RootPid,
+        [string]$SessionId,
+        [ValidateSet('grok', 'cursor')]
+        [string]$Kind,
+        [scriptblock]$GetCommandLine,
+        [scriptblock]$AliveProbe
+    )
+    if (-not (Test-WatchPidAlive -ProcessId $RootPid -Probe $AliveProbe)) { return $false }
+    # Do not name this $cl — injected GetCommandLine scriptblocks often close over $cl.
+    $cmdLine = ''
+    if ($GetCommandLine) {
+        $cmdLine = [string](& $GetCommandLine $RootPid)
+    }
+    else {
+        $row = Get-CimInstance Win32_Process -Filter "ProcessId=$RootPid" -ErrorAction SilentlyContinue
+        if ($row) { $cmdLine = [string]$row.CommandLine }
+    }
+    return Test-WatchCommandLineMatchesSession -CommandLine $cmdLine -SessionId $SessionId -Kind $Kind
+}
+
+function New-AdoptedWatchCurrent {
+    # Pure builder for tests: returns the same shape as Start-WatchedAgent when adopting.
+    param(
+        $State,
+        [int]$RootPid,
+        [ValidateSet('grok', 'cursor')]
+        [string]$Kind,
+        [string]$Exe = ''
+    )
+    $st = $State
+    if ($st -and $st.PSObject.Properties['rootPid']) {
+        $st.rootPid = $RootPid
+    }
+    return [pscustomobject]@{
+        Kind    = $Kind
+        Exe     = $Exe
+        Process = $null
+        RootPid = $RootPid
+        State   = $st
+        Adopted = $true
+    }
+}
+
 function Resolve-WatchSeatPid {
     # coordinator.pid outlives the seat that wrote it. A dead seat= pid gives the new irc_agent the
     # talk-seat nick <mid>-<deadpid>; irc_agent's seat liveness loop then QUITs ("seat ended").
     # Honour seat= only while that process is running; otherwise this watcher is the seat.
-    param([string]$CoordPath, [int]$Default = $PID)
+    # FR #89: if a live irc_agent already owns this home, keep its nick suffix (stable across
+    # monitor reload) even when the old monitor seat= PID is gone.
+    param(
+        [string]$CoordPath,
+        [int]$Default = $PID,
+        [string]$ResolvedHome = '',
+        [scriptblock]$AliveProbe
+    )
+    if ($ResolvedHome) {
+        try {
+            $agents = @(Get-WatchIrcAgentRows -ResolvedHome $ResolvedHome)
+            if ($agents.Count -ge 1) {
+                $suffix = Get-WatchSeatPidFromAgentCommandLine -CommandLine ([string]$agents[0].CommandLine)
+                if ($suffix -gt 0) {
+                    Write-WatchLog ("irc ensure keep seat={0} from live agent pid={1} (stable nick across monitor reload)" -f $suffix, $agents[0].ProcessId)
+                    return $suffix
+                }
+            }
+        }
+        catch {
+            # fall through
+        }
+    }
     if ($CoordPath -and (Test-Path -LiteralPath $CoordPath)) {
         foreach ($line in @(Get-Content -LiteralPath $CoordPath -ErrorAction SilentlyContinue)) {
             if ($line -match '^seat=(\d+)\s*$') {
                 $s = [int]$Matches[1]
-                if ($s -gt 0 -and (Get-Process -Id $s -ErrorAction SilentlyContinue)) { return $s }
+                if ($s -gt 0 -and (Test-WatchPidAlive -ProcessId $s -Probe $AliveProbe)) { return $s }
                 Write-WatchLog ("irc ensure ignoring stale coordinator seat={0} (not running); seat={1}" -f $s, $Default)
             }
         }
@@ -755,11 +864,19 @@ function Ensure-WatchIrcSeat {
     }
     $mid = Get-WatchMachineId
     $coordPath = Join-Path $resolved 'coordinator.pid'
-    $seatPid = Resolve-WatchSeatPid -CoordPath $coordPath -Default $PID
+    # FR #89: prefer live agent nick suffix so monitor reload does not rename the seat.
+    $seatPid = Resolve-WatchSeatPid -CoordPath $coordPath -Default $PID -ResolvedHome $resolved
     if ($agents.Count -eq 0) {
         Clear-WatchStaleQuitRequest -ResolvedHome $resolved
     }
     $nick = ('{0}-{1}' -f $mid, $seatPid)
+    if ($State -and [string]$State.ircNick -match ('^{0}-\d+$' -f [regex]::Escape($mid))) {
+        # Prefer persisted nick while its irc_agent is still the one we found.
+        if ($agents.Count -gt 0 -and [string]$agents[0].CommandLine -match [regex]::Escape([string]$State.ircNick)) {
+            $nick = [string]$State.ircNick
+            if ($nick -match '-(\d+)$') { $seatPid = [int]$Matches[1] }
+        }
+    }
     $channels = ('#bobiverse,#{0},#agentic_irc' -f $mid)
     $env:AGENTIC_IRC_PASSWORD = (Get-Content -LiteralPath $pwFile -Raw).Trim()
     $env:AGENTIC_IRC_DEBUG = '1'
@@ -1431,6 +1548,15 @@ function Start-WatchedAgent {
 
     if ($Grok) {
         $exe = Get-GrokAgentPath
+        $sid = [string]$State.sessionId
+        $prior = 0
+        try { $prior = [int]$State.rootPid } catch { $prior = 0 }
+        if ($prior -gt 0 -and (Test-WatchRootMatchesSession -RootPid $prior -SessionId $sid -Kind 'grok')) {
+            Write-WatchLog "adopt live grok rootPid=$prior session=$sid (no relaunch; FR#89)"
+            $State.seenSession = $true
+            $State.rootPid = $prior
+            return (New-AdoptedWatchCurrent -State $State -RootPid $prior -Kind 'grok' -Exe $exe)
+        }
         $argList = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull)
         if ($resume) {
             $argList += @('-r', [string]$State.sessionId)
@@ -1442,9 +1568,44 @@ function Start-WatchedAgent {
         $started = Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $argList) -WorkingDirectory $cwdFull -PassThru -WindowStyle $script:AgentTuiWindowStyle
         $State.seenSession = $true
         $State.rootPid = [int]$started.Id
-        return [pscustomobject]@{ Kind = 'grok'; Exe = $exe; Process = $started; RootPid = [int]$started.Id; State = $State }
+        return [pscustomobject]@{ Kind = 'grok'; Exe = $exe; Process = $started; RootPid = [int]$started.Id; State = $State; Adopted = $false }
     }
 
+}
+
+function Try-AdoptLiveWatchedAgent {
+    # FR #89: on monitor restart, attach to live TUI if state.rootPid matches session.
+    param($State)
+    if (-not $State) { return $null }
+    $sid = [string]$State.sessionId
+    $rp = 0
+    try { $rp = [int]$State.rootPid } catch { $rp = 0 }
+    if ($rp -le 0 -or -not $sid) { return $null }
+    if ($Grok) {
+        if (Test-WatchRootMatchesSession -RootPid $rp -SessionId $sid -Kind 'grok') {
+            $exe = ''
+            try { $exe = Get-GrokAgentPath } catch { $exe = 'grok' }
+            Write-WatchLog "adopt live grok rootPid=$rp session=$sid (monitor reload; no Start-WatchedAgent)"
+            return (New-AdoptedWatchCurrent -State $State -RootPid $rp -Kind 'grok' -Exe $exe)
+        }
+        return $null
+    }
+    if ($Cursor) {
+        if (Test-CursorPrintOnlyMode -State $State) { return $null }
+        $live = 0
+        try {
+            $live = Resolve-CursorWatchRootPid -SessionId $sid -LauncherPid $rp
+        }
+        catch { $live = 0 }
+        if ($live -le 0) { return $null }
+        $exe = ''
+        try { $exe = Get-CursorAgentCmd } catch { $exe = 'agent' }
+        Write-WatchLog "adopt live cursor rootPid=$live session=$sid (monitor reload; no Start-WatchedAgent)"
+        $State.rootPid = $live
+        $State.seenSession = $true
+        return (New-AdoptedWatchCurrent -State $State -RootPid $live -Kind 'cursor' -Exe $exe)
+    }
+    return $null
 }
 
 function Start-DetachedWatchWorkerIfNeeded {
@@ -1578,9 +1739,27 @@ if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
 $state = Initialize-IrcLogTail -State $state
-Write-WatchLog "watch start kind=$($script:KindName) slot=$($script:ClientSlot) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) (tails irc.log; irc-in lines echo here)"
+$buildStamp = 'FR89-adopt-live-tree'
+if ($Reload) {
+    Write-WatchLog ("reload monitor build={0} pid={1} (adopt live agent if rootPid matches session; keep irc nick)" -f $buildStamp, $PID)
+}
+Write-WatchLog "watch start kind=$($script:KindName) slot=$($script:ClientSlot) windows=$Windows cwd=$Cwd session=$($state.sessionId) ircHome=$($state.ircHome) rootPid=$($state.rootPid) build=$buildStamp (tails irc.log; irc-in lines echo here)"
 
 $current = $null
+# FR #89: adopt live TUI before the loop so we never spawn a second agent.exe on reload.
+try {
+    $adopted = Try-AdoptLiveWatchedAgent -State $state
+    if ($adopted) {
+        $current = $adopted
+        $state = $adopted.State
+        $state.rootPid = $adopted.RootPid
+        Write-WatchState -Obj $state
+        Write-WatchLog ("adopted live agent kind={0} rootPid={1} session={2}" -f $adopted.Kind, $adopted.RootPid, $state.sessionId)
+    }
+}
+catch {
+    Write-WatchLog ("adopt live agent skipped: $($_.Exception.Message)")
+}
 try {
     Write-WatchState -Obj $state
 
@@ -1598,7 +1777,17 @@ try {
         }
         $needStart = $false
         if (-not $current) {
-            $needStart = $true
+            $adopted = $null
+            try { $adopted = Try-AdoptLiveWatchedAgent -State $state } catch { $adopted = $null }
+            if ($adopted) {
+                $current = $adopted
+                $state = $adopted.State
+                $state.rootPid = $adopted.RootPid
+                Write-WatchLog ("adopted live agent kind={0} rootPid={1} session={2}" -f $adopted.Kind, $adopted.RootPid, $state.sessionId)
+            }
+            else {
+                $needStart = $true
+            }
         }
         elseif ($Cursor) {
             if (Test-CursorPrintOnlyMode -State $state) {

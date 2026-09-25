@@ -129,6 +129,54 @@ Invoke-Case 'AM6 mrb hostile address edges (FR#88)' {
     if ($src -notmatch 'FOR YOU \(your IRC nick is') { throw 'FOR YOU format string required' }
 }
 
+
+Invoke-Case 'AM7 FR89 command line matches session (adopt gate)' {
+    Import-WatchFunctions -Names @('Test-WatchCommandLineMatchesSession', 'Test-WatchPidAlive', 'Get-WatchSeatPidFromAgentCommandLine', 'New-AdoptedWatchCurrent', 'Test-WatchRootMatchesSession')
+    $sid = '972c6563-d6ac-4d95-9a7d-0ec509d158a6'
+    $cl = 'C:\x\grok.exe --cwd D:\ai -r ' + $sid + ' prompt'
+    if (-not (Test-WatchCommandLineMatchesSession -CommandLine $cl -SessionId $sid -Kind 'grok')) { throw 'grok+session must match' }
+    if (Test-WatchCommandLineMatchesSession -CommandLine $cl -SessionId 'other' -Kind 'grok') { throw 'wrong session must fail' }
+    if (Test-WatchCommandLineMatchesSession -CommandLine 'notepad.exe' -SessionId $sid -Kind 'grok') { throw 'non-grok must fail' }
+    $alive = { param($p) $p -eq 32208 }
+    $getCl = { param($p) $cl }
+    if (-not (Test-WatchRootMatchesSession -RootPid 32208 -SessionId $sid -Kind 'grok' -GetCommandLine $getCl -AliveProbe $alive)) { throw 'live matching root must adopt' }
+    if (Test-WatchRootMatchesSession -RootPid 1 -SessionId $sid -Kind 'grok' -GetCommandLine $getCl -AliveProbe $alive) { throw 'dead root must not adopt' }
+    $st = [pscustomobject]@{ rootPid = 0; sessionId = $sid }
+    $cur = New-AdoptedWatchCurrent -State $st -RootPid 32208 -Kind 'grok' -Exe 'grok'
+    if (-not $cur.Adopted) { throw 'Adopted flag missing' }
+    if ($cur.RootPid -ne 32208) { throw 'RootPid not set' }
+    if ($st.rootPid -ne 32208) { throw 'state.rootPid not updated' }
+}
+
+Invoke-Case 'AM8 FR89 stable seat nick from live agent command line' {
+    function script:Write-WatchLog { param([string]$Message) }
+    Import-WatchFunctions -Names @('Get-WatchSeatPidFromAgentCommandLine', 'Resolve-WatchSeatPid')
+    $cl = 'python -u irc_agent.py --nick marchhare-34992 --home C:\Users\x\.agentic-irc-watch-grok'
+    $s = Get-WatchSeatPidFromAgentCommandLine -CommandLine $cl
+    if ($s -ne 34992) { throw "expected 34992 got $s" }
+    $coord = Join-Path ([IO.Path]::GetTempPath()) ('am-coord-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $coord | Out-Null
+    try {
+        $cp = Join-Path $coord 'coordinator.pid'
+        Set-Content -LiteralPath $cp -Value "seat=11111`nagent=222`n" -Encoding utf8
+        $dead = { param($p) $false }
+        $got = Resolve-WatchSeatPid -CoordPath $cp -Default 99999 -ResolvedHome '' -AliveProbe $dead
+        if ($got -ne 99999) { throw "dead seat must use Default, got $got" }
+    }
+    finally {
+        Remove-Item -LiteralPath $coord -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Invoke-Case 'AM9 FR89 Reload switch and adopt hooks in script' {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch '\[switch\]\$Reload') { throw 'missing -Reload switch' }
+    if ($src -notmatch 'Try-AdoptLiveWatchedAgent') { throw 'missing Try-AdoptLiveWatchedAgent' }
+    if ($src -notmatch 'FR89-adopt-live-tree') { throw 'missing build stamp log' }
+    if ($src -notmatch 'adopt live grok rootPid') { throw 'missing adopt log path' }
+    if ($src -notmatch 'stable nick across monitor reload') { throw 'missing stable nick path' }
+}
+
 Write-Host ''
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
