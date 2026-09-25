@@ -150,7 +150,7 @@ Invoke-Case 'AM7 FR89 command line matches session (adopt gate)' {
 
 Invoke-Case 'AM8 FR89 stable seat nick from live agent command line' {
     function script:Write-WatchLog { param([string]$Message) }
-    Import-WatchFunctions -Names @('Get-WatchSeatPidFromAgentCommandLine', 'Resolve-WatchSeatPid')
+    Import-WatchFunctions -Names @('Get-WatchSeatPidFromAgentCommandLine', 'Test-WatchPidAlive', 'Resolve-WatchSeatPid')
     $cl = 'python -u irc_agent.py --nick marchhare-34992 --home C:\Users\x\.agentic-irc-watch-grok'
     $s = Get-WatchSeatPidFromAgentCommandLine -CommandLine $cl
     if ($s -ne 34992) { throw "expected 34992 got $s" }
