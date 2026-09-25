@@ -33,16 +33,21 @@ On **Restricted** ExecutionPolicy, use these `.cmd` wrappers (`-ExecutionPolicy 
 
 ## IRC homes (watch seat only)
 
-- Grok: `%USERPROFILE%\.agentic-irc-watch-grok`
-- Cursor: `%USERPROFILE%\.agentic-irc-watch-cursor`
+- Grok seat 1: `%USERPROFILE%\.agentic-irc-watch-grok`
+- Grok seat N≥2: `%USERPROFILE%\.agentic-irc-watch-grok-N` (e.g. `-2`)
+- Cursor seat 1: `%USERPROFILE%\.agentic-irc-watch-cursor`
+- Cursor seat N≥2: `%USERPROFILE%\.agentic-irc-watch-cursor-N`
+
+Each seat binds its own home, nick `{machine}-{pid}`, state dir, and log (**FR #97**). Seat N never adopts seat 1's `irc_agent`/`irc_listen`, never truncates another seat's log, and never QUITs another seat on stop.
 
 Do not use talk-seat / bobiverse Watch homes (see playbook).
 
 ## Log (not in git)
 
-Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`
+- Seat 1: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`
+- Seat N: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth-N.log`
 
-Session state: `%USERPROFILE%\.grok\agent-health\state-grok.json` or `state-cursor.json`.
+Session state: `%USERPROFILE%\.grok\agent-health\watch-{grok|cursor}-{slot}\state.json`.
 
 ## Repo docs
 
