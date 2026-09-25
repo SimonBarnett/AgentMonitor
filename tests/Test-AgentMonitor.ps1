@@ -221,7 +221,10 @@ Invoke-Case 'AM97 seat N owns bound IRC home (FR#97 two-seat isolation)' {
         if ($SeatHome -match '-(\d+)$') { return [int]$Matches[1] }
         return 1
     }
-    Import-WatchFunctions -Names @('Get-WatchBoundIrcHome', 'Bind-WatchSlot', 'Disconnect-WatchIrc', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText')
+    Import-WatchFunctions -Names @(
+        'Get-WatchBoundIrcHome', 'Bind-WatchSlot', 'Disconnect-WatchIrc',
+        'Get-IrcFromParts', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText'
+    )
     # Seat 1 bind
     $script:IrcHomeExplicit = $true
     $script:KindName = 'grok'
