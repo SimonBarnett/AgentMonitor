@@ -884,6 +884,7 @@ function Get-AgentPrompt {
         "IRC home: $ResolvedIrcHome. Seat JOINs #bobiverse, #{machine}, #agentic_irc. Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
+        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you (ASSIGN = your job: ACK on that channel, then do it)."
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
@@ -1043,6 +1044,31 @@ function Send-WatchIrcPong {
     return $true
 }
 
+function Test-WatchIrcAddressedToNick {
+    param([string]$Text, [string]$OurNick)
+    # "marchhare-34992: ASSIGN ..." / "@marchhare-34992, ..." / "marchhare-34992 - ..."
+    $t = ([string]$Text).Trim()
+    $n = ([string]$OurNick).Trim()
+    if (-not $t -or -not $n) { return $false }
+    $esc = [regex]::Escape($n)
+    return ($t -match ("^(?i)@?{0}(\s*[:,]|\s+-\s|\s*$)" -f $esc))
+}
+
+function Format-WatchWakeText {
+    # Wake payload for the headless resume (agent -r <sid> -p <text>).
+    # The session never learns its IRC nick from the seed prompt, so a line addressed to
+    # "marchhare-34992:" was read as "for another seat" and ignored (FR skills-visionary#19
+    # ASSIGN, 2026-09-25). Addressed lines now carry an explicit FOR YOU marker + our nick.
+    param([string]$Line, [string]$OurNick, [int]$MaxLen = 350)
+    $text = ([string]$Line).Trim()
+    if ($text.Length -gt $MaxLen) { $text = $text.Substring(0, $MaxLen) }
+    $parts = Get-IrcFromParts -Line $text
+    if ($parts -and $OurNick -and (Test-WatchIrcAddressedToNick -Text $parts.text -OurNick $OurNick)) {
+        return ('FOR YOU (your IRC nick is {0}; this line is addressed to you - act on it and reply on outbox to {1}): {2}' -f $OurNick, $parts.target, $text)
+    }
+    return $text
+}
+
 function Send-IrcLineToSession {
     param(
         $State,
@@ -1081,8 +1107,7 @@ function Send-IrcLineToSession {
     $inbox = Join-Path $script:StateDir 'agent-inbox.txt'
     Add-Content -LiteralPath $inbox -Value $Line -Encoding utf8
     $cwdFull = [IO.Path]::GetFullPath($Cwd)
-    $text = $Line.Trim()
-    if ($text.Length -gt 350) { $text = $text.Substring(0, 350) }
+    $text = Format-WatchWakeText -Line $Line -OurNick (Get-WatchSeatNick -State $State)
     $sid = [string]$State.sessionId
     if ($Grok) {
         $exe = Get-GrokAgentPath
