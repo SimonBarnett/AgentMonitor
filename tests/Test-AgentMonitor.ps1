@@ -61,6 +61,49 @@ Invoke-Case 'AM2 publish shortcuts keeps clone clean' {
     }
 }
 
+
+function Import-WatchFunctions {
+    param([string[]]$Names)
+    $path = Join-Path $RepoRoot 'Watch-AgentHealth.ps1'
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errs)
+    foreach ($n in $Names) {
+        $fn = $ast.Find({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq $n }, $true)
+        if (-not $fn) { throw "function $n missing from Watch-AgentHealth.ps1" }
+        . ([scriptblock]::Create($fn.Extent.Text))
+        Set-Item -Path ("function:script:" + $n) -Value (Get-Item ("function:" + $n)).ScriptBlock
+    }
+}
+
+Invoke-Case 'AM3 addressed FROM wake names the seat nick (FR#19 ASSIGN ignored)' {
+    Import-WatchFunctions -Names @('Get-IrcFromParts', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText')
+    $line = 'FROM bob-marchhare #marchhare marchhare-34992: ASSIGN FR SimonBarnett/skills-visionary#19 ACK here when you start.'
+    $w = Format-WatchWakeText -Line $line -OurNick 'marchhare-34992'
+    if ($w -notmatch '^FOR YOU \(your IRC nick is marchhare-34992;') { throw "addressed wake must start FOR YOU + nick: $w" }
+    if ($w -notmatch 'reply on outbox to #marchhare') { throw "wake must name the reply channel: $w" }
+    if (-not $w.EndsWith($line)) { throw 'wake must carry the full FROM line' }
+    foreach ($t in @('@marchhare-34992, go', 'MARCHHARE-34992 - hi', 'marchhare-34992')) {
+        if (-not (Test-WatchIrcAddressedToNick -Text $t -OurNick 'marchhare-34992')) { throw "should be addressed: $t" }
+    }
+}
+
+Invoke-Case 'AM4 unaddressed / other-nick FROM wake unchanged' {
+    Import-WatchFunctions -Names @('Get-IrcFromParts', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText')
+    $a = 'FROM bob-marchhare #bobiverse marchhare is idle.'
+    if ((Format-WatchWakeText -Line $a -OurNick 'marchhare-34992') -ne $a) { throw 'unaddressed line must pass through' }
+    $b = 'FROM bob-marchhare #marchhare marchhare-349920: ASSIGN x'
+    if ((Format-WatchWakeText -Line $b -OurNick 'marchhare-34992') -ne $b) { throw 'prefix-collision nick must not match' }
+    if ((Format-WatchWakeText -Line $a -OurNick '') -ne $a) { throw 'no nick -> unchanged' }
+    $long = 'FROM x #c ' + ('y' * 500)
+    if ((Format-WatchWakeText -Line $long -OurNick 'n').Length -ne 350) { throw 'unaddressed wake still capped at 350' }
+}
+
+Invoke-Case 'AM5 Send-IrcLineToSession uses Format-WatchWakeText + prompt names nick' {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'Format-WatchWakeText -Line \$Line -OurNick \(Get-WatchSeatNick -State \$State\)') { throw 'forward path must build wake via Format-WatchWakeText with seat nick' }
+    if ($src -notmatch 'Your IRC nick is nick= in') { throw 'seed prompt must tell the seat where its nick is' }
+}
+
 Write-Host ''
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
