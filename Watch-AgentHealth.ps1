@@ -10,7 +10,7 @@
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
   Does not stamp UAT. Does not send !bobiverse.
-  The TUI agent does not probe IRC â€” it acts on monitor FROM only (skill watch-seat).
+  The TUI agent does not probe IRC Ã¢â‚¬â€ it acts on monitor FROM only (skill watch-seat).
 
 .EXAMPLE
   Desktop\Watch-AgentHealth.cmd cursor
@@ -36,7 +36,7 @@ param(
     # FR #89: monitor-only reload. Adopts live agent tree (state.rootPid + session) and keeps
     # ircNick / seat nick when irc_agent is already up. Does not require killing agent.exe.
     # Usage: stop the old monitor process, then start with -Reload (or tray/script that passes it).
-    # Do not use to force a second TUI — adoption skips Start-WatchedAgent when the tree is healthy.
+    # Do not use to force a second TUI â€” adoption skips Start-WatchedAgent when the tree is healthy.
     [switch]$Reload,
 
     # Cursor agent --model (e.g. auto). Empty = CLI default. Tray Agents always passes auto.
@@ -55,7 +55,7 @@ param(
     [ValidateRange(60, 600)]
     [int]$BoredIdleSeconds = 120,
 
-    # FR #100: repeat !bored while still idle (2–5 min window; default 3 min).
+    # FR #100: repeat !bored while still idle (2â€“5 min window; default 3 min).
     [ValidateRange(120, 300)]
     [int]$BoredRepeatSeconds = 180,
 
@@ -189,7 +189,7 @@ function Test-WatchFixedWritableDriveRoot {
         return $true
     }
     catch {
-        # Missing/ejected letter, ACL deny, or non-fixed — never throw into Resolve-AgentWorkspace.
+        # Missing/ejected letter, ACL deny, or non-fixed â€” never throw into Resolve-AgentWorkspace.
         try {
             if ($probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
         }
@@ -199,7 +199,7 @@ function Test-WatchFixedWritableDriveRoot {
 }
 
 function Get-WatchFixedDriveLetters {
-    # Simon 2026-09-25: letter order C, D, E, … — fixed local disks only.
+    # Simon 2026-09-25: letter order C, D, E, â€¦ â€” fixed local disks only.
     $letters = @()
     foreach ($disk in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
         $id = [string]$disk.DeviceID
@@ -221,7 +221,7 @@ function Resolve-AgentWorkspace {
     }
     $leaf = 'ai'
     $letters = @(Get-WatchFixedDriveLetters)
-    # Existing \ai: fixed disk only (DriveType=3). Do not require root writability —
+    # Existing \ai: fixed disk only (DriveType=3). Do not require root writability â€”
     # C:\ may deny create-in-root while C:\ai already exists and is usable.
     foreach ($letter in $letters) {
         $root = '{0}:\' -f $letter
@@ -266,7 +266,7 @@ $script:StateDir = Join-Path $env:USERPROFILE '.grok\agent-health'
 $script:IrcHomeExplicit = [bool]($PSBoundParameters.ContainsKey('IrcHome') -and $IrcHome)
 $script:ClientSlot = 1
 $script:BoundIrcHome = $null
-# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 â€¦).
+# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 Ã¢â‚¬Â¦).
 $script:StatePath = Join-Path $script:StateDir ("state-{0}.json" -f $script:KindName)
 $script:WorkerPidPath = Join-Path $script:StateDir ("watch-worker-{0}.pid" -f $script:KindName)
 if (-not $IrcHome) {
@@ -980,7 +980,7 @@ function Bind-WatchSlot {
     else {
         $script:LogFile = $LogPath
     }
-    # Create log only if missing — never truncate another seat's log (FR #97).
+    # Create log only if missing â€” never truncate another seat's log (FR #97).
     if (-not (Test-Path -LiteralPath $script:LogFile)) {
         $parent = Split-Path -Parent $script:LogFile
         if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
@@ -1108,7 +1108,7 @@ function Test-ForbiddenIrcHome {
 function Initialize-WatchIrcHome {
     param($State)
     # FR #97: always bound home for this seat
-    # FR #124: never assign to $home — PowerShell 5.1 $HOME is read-only/constant.
+    # FR #124: never assign to $home â€” PowerShell 5.1 $HOME is read-only/constant.
     $boundHome = Get-WatchBoundIrcHome
     if (-not $boundHome) { $boundHome = [string]$IrcHome }
     $resolved = [IO.Path]::GetFullPath($boundHome)
@@ -1224,7 +1224,7 @@ function Test-WatchRootMatchesSession {
 }
 
 function Try-AdoptLiveWatchAgent {
-    # FR #89: on monitor restart, adopt state.rootPid when it still hosts this session — no relaunch.
+    # FR #89: on monitor restart, adopt state.rootPid when it still hosts this session â€” no relaunch.
     param(
         $State,
         [string]$CommandLine = ''
@@ -1267,8 +1267,8 @@ function Resolve-StableWatchIrcNick {
     if ($agents.Count -eq 0 -and $ResolvedHome) {
         $agents = @(Get-WatchIrcAgentRows -ResolvedHome $ResolvedHome)
     }
-    # Live irc_agent already holding a nick: keep only if that nick's suffix PID is still alive
-    # (otherwise seat liveness will PART "seat ended" — AgentMonitor #136).
+            Write-WatchLog ("watch stop: TUI rootPid={0} still alive - leave IRC up" -f $rp)
+    # (otherwise seat liveness will PART "seat ended" â€” AgentMonitor #136).
     foreach ($row in $agents) {
         $cl = [string]$row.CommandLine
         if ($cl -match '--nick\s+(\S+)') {
@@ -1406,7 +1406,7 @@ function Ensure-WatchIrcSeat {
             if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
             # #136/#137: seat= must be a LIVE pid matching nick suffix when possible.
             # Writing seat=$PID (monitor) while nick is marchhare-<tui> makes the next
-            # Ensure / liveness disagree — looks like "!bored dropped IRC".
+            # Ensure / liveness disagree â€” looks like "!bored dropped IRC".
             $liveSeat = Resolve-WatchSeatPid -CoordPath (Join-Path $resolved 'coordinator.pid') -Default $PID -State $State
             $nickSuffix = 0
             if ($nick -match '-(\d+)$') { $nickSuffix = [int]$Matches[1] }
@@ -1414,7 +1414,7 @@ function Ensure-WatchIrcSeat {
                 $liveSeat = $nickSuffix
             }
             elseif ($nickSuffix -gt 0) {
-                # Agent is up with a dead nick suffix — force relaunch with live seat nick.
+                # Agent is up with a dead nick suffix â€” force relaunch with live seat nick.
                 Write-WatchLog ("irc seat already up but nick {0} suffix dead; relaunch with seat={1}" -f $nick, $liveSeat)
                 foreach ($row in @($agents + $listens)) {
                     Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
@@ -1475,7 +1475,7 @@ function Ensure-WatchIrcSeat {
             $seatPid = $nickPid
         }
         else {
-            # Dead suffix — force re-nick to live seatPid (do not copy dead pid into SEAT_PID).
+            # Dead suffix â€” force re-nick to live seatPid (do not copy dead pid into SEAT_PID).
             $nick = ('{0}-{1}' -f $mid.ToLowerInvariant(), $seatPid)
             Write-WatchLog ("irc ensure re-nick to {0} (live seat)" -f $nick)
         }
@@ -1546,7 +1546,7 @@ function Ensure-WatchIrcSeat {
     }
     $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
     $State | Add-Member -NotePropertyName 'ircChannels' -NotePropertyValue $channels -Force
-    # Simon 2026-09-26: !bored on connect — re-arm start bored when irc_agent was (re)launched.
+    # Simon 2026-09-26: !bored on connect â€” re-arm start bored when irc_agent was (re)launched.
     $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue ([bool]$didConnect) -Force
     return $State
 }
@@ -1606,14 +1606,14 @@ function Disconnect-WatchIrc {
 }
 
 function Test-WatchSeatRootGone {
-    # FR #126: true after root/console teardown — no IRC reconnect, !bored, or wakes.
+    # FR #126: true after root/console teardown â€” no IRC reconnect, !bored, or wakes.
     param($State)
     if (-not $State) { return $false }
     return ($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone
 }
 
 function Complete-WatchSeatRootExit {
-    # FR #126: seat console/root gone → QUIT this home, stop IRC children + root tree,
+    # FR #126: seat console/root gone â†’ QUIT this home, stop IRC children + root tree,
     # clear wake queue, mark seatRootGone. Caller exits the monitor loop (no relaunch).
     # Bound-home checks inside Disconnect-WatchIrc leave other slots untouched.
     param(
@@ -1665,7 +1665,7 @@ function Get-CursorSeedPrompt {
         "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (own #{machine} channel only)."
         'Monitor posts !bored for you on start, after DONE, and while idle (own #{machine} only). Do not post busy/idle status yourself.'
         'ACK/DONE outbox lines: bare keyword-first only (no PRIVMSG wrap, no nick: prefix). Skills watch-seat / bob-git-accept have the exact wire.'
-        'You are NOT on IRC by reading irc.log or counting processes — you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
+        'You are NOT on IRC by reading irc.log or counting processes â€” you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
 
@@ -1744,7 +1744,7 @@ function Get-GrokRules {
     if (Test-WatchNoBored) {
         return "Skills live at $skills. Loop seat: never !bored, never ACK/DONE to Jeeves, never fleet job loop. Monitor forwards FROM only. Harvest AgentMonitor playbooks to this repo when relevant."
     }
-    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills / bob-git-accept). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored; Jeeves assign → ACK FR|MRB|UAT owner/repo#N (line starts with ACK, no nick prefix) → work → DONE FR|MRB|UAT owner/repo#N [PASS|FAIL] <url> (nothing after URL) → STOP; append outbox only; never post !bored yourself."
+    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills / bob-git-accept). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored; Jeeves assign â†’ ACK FR|MRB|UAT owner/repo#N (line starts with ACK, no nick prefix) â†’ work â†’ DONE FR|MRB|UAT owner/repo#N [PASS|FAIL] <url> (nothing after URL) â†’ STOP; append outbox only; never post !bored yourself."
 }
 
 function Get-DescendantPids {
@@ -1773,7 +1773,7 @@ function Test-TreeHealthy {
     if ($RootPid -le 0) { return $false }
     # Grok: only check the TUI root PID. Full Win32_Process descendant scans hang the
     # monitor on busy boxes; Responding=$false is also a false unhealthy for console hosts.
-    # False unhealthy → Complete-WatchSeatRootExit → Disconnect-WatchIrc (IRC lost).
+    # False unhealthy â†’ Complete-WatchSeatRootExit â†’ Disconnect-WatchIrc (IRC lost).
     if ($script:KindName -eq 'grok' -or [bool]$Grok) {
         return $null -ne (Get-Process -Id $RootPid -ErrorAction SilentlyContinue)
     }
@@ -1803,7 +1803,7 @@ function Test-DropIrcLine {
     if ($Line -notmatch '^FROM ') { return $true }
     # Protocol tokens are UPPERCASE; -cmatch so chat words (digest, point, seal) still forward.
     if ($Line -cmatch ' POINT | DIGEST | AGPK | SEAL ') { return $true }
-    # Do NOT drop chat PING here â€” Send-IrcLineToSession auto-pongs first (CAST IRON).
+    # Do NOT drop chat PING here Ã¢â‚¬â€ Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false
 }
@@ -1841,7 +1841,7 @@ function Test-WatchIrcPingText {
         [string]$Text,
         [string]$OurNick = ''
     )
-    # CAST IRON: any ping aimed at this seat (bare or addressed) â€” watcher pongs, never wakes agent.
+    # CAST IRON: any ping aimed at this seat (bare or addressed) Ã¢â‚¬â€ watcher pongs, never wakes agent.
     $t = ([string]$Text).Trim()
     if (-not $t) { return $false }
     if ($t -match '^(?i)ping$') { return $true }
@@ -1882,7 +1882,7 @@ function Set-WatchBoredActivity {
 }
 
 function Get-WatchOutboxPayload {
-    # Strip PRIVMSG prefix; return chat payload (ACK / DONE / !bored / …).
+    # Strip PRIVMSG prefix; return chat payload (ACK / DONE / !bored / â€¦).
     param([string]$Line)
     $t = ([string]$Line).Trim()
     if ($t -match '^PRIVMSG\s+\S+\s+:(.*)$') { return $Matches[1].Trim() }
@@ -1997,7 +1997,7 @@ function Send-WatchIrcBored {
 }
 
 function Get-WatchOutboxDoneKey {
-    # Stable key = DONE payload only (must not include outbox length — appending !bored
+    # Stable key = DONE payload only (must not include outbox length â€” appending !bored
     # would change the key and re-fire reason=done every poll).
     param([string]$OutboxPath)
     $rows = @(Get-WatchOutboxRows -OutboxPath $OutboxPath)
@@ -2011,7 +2011,7 @@ function Get-WatchOutboxDoneKey {
 }
 
 function Sync-WatchBored {
-    # FR #100: monitor emits !bored on start, after DONE, and while idle — never while busy.
+    # FR #100: monitor emits !bored on start, after DONE, and while idle â€” never while busy.
     # Works with zero model tokens. Own #{machine} only.
     # FR #103: -NoBored / -SeatType loop suppresses every !bored trigger.
     param(
@@ -2133,7 +2133,7 @@ function Sync-WatchBored {
         if ($reason -eq 'start') {
             $State.boredStartSent = $true
             # FR #124: seed DONE key on start so a pre-restart DONE in outbox does not
-            # fire reason=done a few seconds later (stale completion → extra !bored).
+            # fire reason=done a few seconds later (stale completion â†’ extra !bored).
             if ($doneKey) { $State.boredLastDoneKey = $doneKey }
         }
         if ($reason -eq 'done') { $State.boredLastDoneKey = $doneKey }
@@ -2244,7 +2244,7 @@ function Archive-WatchSessionDir {
     try {
         New-Item -ItemType Directory -Force -Path $archRoot | Out-Null
         $dest = Join-Path $archRoot $leaf
-        # Move (never delete). Live Grok/Cursor TUI often locks updates.jsonl —
+        # Move (never delete). Live Grok/Cursor TUI often locks updates.jsonl â€”
         # Access denied must not abort IRC forward (marchhare 2026-09-26).
         Move-Item -LiteralPath $SessionDir -Destination $dest -Force -ErrorAction Stop
         return [pscustomobject]@{ ok = $true; archivePath = $dest; reason = $Reason }
@@ -2342,7 +2342,7 @@ function Ensure-WatchSessionBeforeResume {
     $State | Add-Member -NotePropertyName 'lastSessionRotate' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
     $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'oversized-archive-failed' -Force
     Write-WatchLog ("session rotate oversized archive-failed keep-session={0} updatesMb={1:N1} reason={2}" -f $old, ($info.UpdatesBytes / 1MB), $arch.reason)
-    # Best-effort digest note only — never block IRC forward / wake start (marchhare hangs).
+    # Best-effort digest note only â€” never block IRC forward / wake start (marchhare hangs).
     try {
         Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized-archive-failed' -Fields @{
             old_session = $old
@@ -2472,7 +2472,7 @@ function Format-WatchWakeText {
     if ($text.Length -gt $MaxLen) { $text = $text.Substring(0, $MaxLen) }
     $parts = Get-IrcFromParts -Line $text
     if ($parts -and $OurNick -and (Test-WatchIrcAddressedToNick -Text $parts.text -OurNick $OurNick)) {
-        # FR #104: remind wire on every FOR YOU wake — agents copy nick: from the ear line otherwise.
+        # FR #104: remind wire on every FOR YOU wake â€” agents copy nick: from the ear line otherwise.
         return ('FOR YOU (your IRC nick is {0}; this line is addressed to you - act on it and reply on outbox to {1}). Outbox ACK/DONE: line must start with ACK or DONE (no {0}: prefix); append PRIVMSG only; DONE ends at the URL: {2}' -f $OurNick, $parts.target, $text)
     }
     return $text
@@ -2533,7 +2533,7 @@ function Send-IrcLineToSession {
     }
     $trim = $Line.Trim()
     if ($trim -match '^FROM ') {
-        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself â€” never forward to agent
+        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself Ã¢â‚¬â€ never forward to agent
         # (busy seats still answer so fleet knows they are responding).
         $parts = Get-IrcFromParts -Line $trim
         if ($parts) {
@@ -2557,7 +2557,7 @@ function Send-IrcLineToSession {
         Write-WatchLog ('listen {0}' -f $trim.Substring(0, [Math]::Min(120, $trim.Length)))
     }
     if (Test-DropIrcLine -Line $Line) { return $State }
-    # FR #126: root/console gone — no new wakes.
+    # FR #126: root/console gone â€” no new wakes.
     if (($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone) {
         Write-WatchLog 'forward skipped (seat root gone)'
         return $State
@@ -3030,7 +3030,7 @@ $script:LogFile = $LogPath
 if (-not $WatchWorker -and $Windows -eq 'on') {
     $WatchWorker = $true
 }
-# Next free .agentic-irc-watch-* / -2 / -3 … before spawning the detached worker.
+# Next free .agentic-irc-watch-* / -2 / -3 â€¦ before spawning the detached worker.
 Bind-WatchSlot
 Start-DetachedWatchWorkerIfNeeded
 $state = Read-WatchState
@@ -3131,7 +3131,7 @@ try {
                 }
             }
         }
-        # FR #126: root/console gone — monitor exits (finally writes watch-stop QUIT if needed).
+        # FR #126: root/console gone â€” monitor exits (finally writes watch-stop QUIT if needed).
         if (Test-WatchSeatRootGone -State $state) {
             Write-WatchLog "seat root gone - monitor exit (no !bored, no wakes, no IRC reconnect)"
             Write-WatchState -Obj $state
@@ -3174,7 +3174,7 @@ try {
             }
         }
         elseif (-not (Test-TreeHealthy -RootPid $current.RootPid)) {
-            # FR #126: do not relaunch — orphan watcher must leave IRC (QUIT) and exit.
+            # FR #126: do not relaunch â€” orphan watcher must leave IRC (QUIT) and exit.
             Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - root exit teardown (no restart) session=$($state.sessionId)"
             $state = Complete-WatchSeatRootExit -State $state -RootPid $current.RootPid -Reason 'tui closed'
             $current.RootPid = 0
@@ -3223,7 +3223,7 @@ catch {
     Write-WatchLog ("watch fatal: $($_.Exception.Message)")
 }
 finally {
-    # Hotpatch / Reload / crash: if the interactive TUI is still alive, leave IRC up
+            Write-WatchLog ("watch stop: TUI rootPid={0} still alive - leave IRC up" -f $rp)
     # so the seat stays on channel (Disconnect was dropping IRC on every monitor exit).
     $leaveIrc = $false
     if ($state) {
@@ -3234,7 +3234,7 @@ finally {
         }
         if ($rp -gt 0 -and (Get-Process -Id $rp -ErrorAction SilentlyContinue)) {
             $leaveIrc = $true
-            Write-WatchLog ("watch stop: TUI rootPid={0} still alive — leave IRC up" -f $rp)
+            Write-WatchLog ("watch stop: TUI rootPid={0} still alive - leave IRC up" -f $rp)
         }
         elseif (-not (Test-WatchSeatRootGone -State $state)) {
             Disconnect-WatchIrc -State $state -Reason 'watch stop'
