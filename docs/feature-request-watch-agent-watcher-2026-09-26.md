@@ -27,3 +27,11 @@ a clear line in the log tying cause → effect.
 
 ## Logging in Watch-AgentHealth
 `irc-health tag=…` snapshots on ensure / missing / tick / disconnect.
+
+## Finding: sticky seatRootGone death loop (2026-09-26)
+Heal/`-Reload` left `state.seatRootGone=true` and `rootPid=0` (session id also
+drifted). Monitor: Ensure IRC → `seat root gone - monitor exit` → prune orphan
+python → IRC gone. Meta-watcher saw FAIL and Heal-looped.
+
+**Fix:** On `-Reload`, if a live `agent.exe` still hosts `state.sessionId` (or
+adopt succeeds), clear `seatRootGone` and restore `rootPid`.

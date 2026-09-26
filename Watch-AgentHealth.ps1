@@ -3166,6 +3166,35 @@ try {
     Write-WatchState -Obj $state
     if ($Reload) {
         Write-WatchLog ("watch reload FR#89 build=adopt-live-agent monitorPid={0} session={1} priorRootPid={2}" -f $PID, $state.sessionId, $state.rootPid)
+        # Sticky seatRootGone with a live TUI left heal/Reload in a death loop
+        # (ensure IRC -> exit seatRootGone -> prune orphans). Clear when adopt works.
+        if (Test-WatchSeatRootGone -State $state) {
+            $adoptTry = Try-AdoptLiveWatchAgent -State $state
+            if (-not $adoptTry -and $state.sessionId) {
+                # Scan for live agent.exe hosting this session id
+                $rows = @(Get-CimInstance Win32_Process -Filter "Name='agent.exe'" -ErrorAction SilentlyContinue | Where-Object {
+                        ([string]$_.CommandLine).IndexOf([string]$state.sessionId, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                    })
+                if ($rows.Count -gt 0) {
+                    $state.rootPid = [int]$rows[0].ProcessId
+                    $state.seatRootGone = $false
+                    if ($state.PSObject.Properties.Name -contains 'seatUnhealthy') { $state.seatUnhealthy = $false }
+                    Write-WatchLog ("reload cleared sticky seatRootGone; adopted live TUI rootPid={0}" -f $state.rootPid)
+                    Write-WatchState -Obj $state
+                }
+            }
+            elseif ($adoptTry) {
+                $state = $adoptTry.State
+                $state.rootPid = $adoptTry.RootPid
+                $state.seatRootGone = $false
+                if ($state.PSObject.Properties.Name -contains 'seatUnhealthy') { $state.seatUnhealthy = $false }
+                Write-WatchLog ("reload cleared sticky seatRootGone via Try-Adopt rootPid={0}" -f $state.rootPid)
+                Write-WatchState -Obj $state
+            }
+            else {
+                Write-WatchLog 'reload seatRootGone sticky and no live TUI - will exit loop'
+            }
+        }
     }
     else {
         Write-WatchLog ("watch build FR#89-adopt-live-agent monitorPid={0}" -f $PID)
