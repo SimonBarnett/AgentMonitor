@@ -46,6 +46,10 @@ Do not use talk-seat / bobiverse Watch homes (see playbook).
 
 **Forward dedupe (FR #105):** identical IRC `FROM` lines are skipped for `-ForwardDedupeSeconds` (default **60**), then forwarded again. Every skip is logged (`forward skipped (duplicate within …)`).
 
+**Wake lifecycle (FR #91):** at most one hidden `-p` wake per session. Further FROM lines queue
+(coalesce duplicates). `-WakeTimeoutSeconds` (default **1800**) kills hung wakes (`wake timeout`).
+On monitor start, orphan `-p` wakes whose parent is dead are reaped; interactive TUI (no `-p`) is never touched.
+
 **Visible IRC wakes (FR #90 Option B):** each hidden `agent -p` / Cursor `-p` forward is logged to
 `%USERPROFILE%\.grok\agent-health\watch-<kind>-<slot>\seat-wake-transcript.log` with
 `wake start … pid=` and later `wake end … exit=`. With `-Windows on`, the monitor opens a
