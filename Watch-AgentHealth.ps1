@@ -67,6 +67,10 @@ param(
     [ValidateRange(1, 15)]
     [int]$BoredCheckSeconds = 5,
 
+    # FR #105: identical FROM lines are deduped only for this many seconds (then re-forward).
+    [ValidateRange(5, 600)]
+    [int]$ForwardDedupeSeconds = 60,
+
     # FR #103: fleet (default) vs loop (continuous non-job agent; never !bored / ACK-Jeeves).
     [ValidateSet('fleet', 'loop')]
     [string]$SeatType = 'fleet',
@@ -89,6 +93,7 @@ $script:BoredIdleSeconds = [int]$BoredIdleSeconds
 $script:BoredRepeatSeconds = [int]$BoredRepeatSeconds
 $script:BoredAckStaleMinutes = [int]$BoredAckStaleMinutes
 $script:BoredCheckSeconds = [int]$BoredCheckSeconds
+$script:ForwardDedupeSeconds = [int]$ForwardDedupeSeconds
 $script:SeatType = ([string]$SeatType).Trim().ToLowerInvariant()
 if (-not $script:SeatType) { $script:SeatType = 'fleet' }
 $script:NoBored = [bool]$NoBored -or ($script:SeatType -eq 'loop')
@@ -1554,13 +1559,57 @@ function Format-WatchWakeText {
     return $text
 }
 
+function Test-WatchForwardDedupeHit {
+    # FR #105: true when $Line matches last forward and age is still within TTL.
+    param(
+        $State,
+        [string]$Line,
+        [datetime]$Now = $(Get-Date),
+        [int]$TtlSeconds = 0
+    )
+    if (-not $State) { return $false }
+    if (-not ($State.PSObject.Properties.Name -contains 'lastForwardLine')) { return $false }
+    if ([string]$State.lastForwardLine -ne [string]$Line) { return $false }
+    $ttl = [int]$TtlSeconds
+    if ($ttl -le 0) { $ttl = [int]$script:ForwardDedupeSeconds }
+    if ($ttl -le 0) { $ttl = 60 }
+    $lastUtc = $null
+    if ($State.PSObject.Properties.Name -contains 'lastForwardUtc' -and $State.lastForwardUtc) {
+        try { $lastUtc = [datetime]$State.lastForwardUtc } catch { $lastUtc = $null }
+    }
+    if (-not $lastUtc) {
+        # Legacy state without timestamp: treat as expired so re-offers wake again.
+        return $false
+    }
+    $age = ($Now - $lastUtc).TotalSeconds
+    return ($age -ge 0 -and $age -lt [double]$ttl)
+}
+
+function Set-WatchLastForward {
+    param(
+        $State,
+        [string]$Line,
+        [datetime]$Now = $(Get-Date)
+    )
+    if (-not $State) { return $State }
+    $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+    $State | Add-Member -NotePropertyName 'lastForwardUtc' -NotePropertyValue $Now -Force
+    return $State
+}
+
 function Send-IrcLineToSession {
     param(
         $State,
         [string]$Line
     )
     try {
-    if ($State.PSObject.Properties.Name -contains 'lastForwardLine' -and [string]$State.lastForwardLine -eq $Line) {
+    if (Test-WatchForwardDedupeHit -State $State -Line $Line) {
+        $age = '?'
+        try {
+            $age = [int]((Get-Date) - [datetime]$State.lastForwardUtc).TotalSeconds
+        }
+        catch { }
+        Write-WatchLog ('forward skipped (duplicate within {0}s, age={1}s) {2}' -f $script:ForwardDedupeSeconds, $age, ([string]$Line).Substring(0, [Math]::Min(120, ([string]$Line).Length)))
         return $State
     }
     $trim = $Line.Trim()
@@ -1575,7 +1624,7 @@ function Send-IrcLineToSession {
                 $seatHome = [string]$State.ircHome
                 if (-not $seatHome) { $seatHome = $IrcHome }
                 [void](Send-WatchIrcPong -IrcHome $seatHome -Target $parts.target -Nick $parts.nick)
-                $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+                $State = Set-WatchLastForward -State $State -Line $Line
                 return $State
             }
         }
@@ -1598,7 +1647,7 @@ function Send-IrcLineToSession {
         $exe = Get-GrokAgentPath
         $args = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull, '-r', $sid, '-p', $text)
         Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden | Out-Null
-        $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+        $State = Set-WatchLastForward -State $State -Line $Line
         $State = Set-WatchBoredActivity -State $State
         Write-WatchLog ('forward grok session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
         return $State
@@ -1630,7 +1679,7 @@ function Send-IrcLineToSession {
     [IO.File]::WriteAllText($launch, $body, $utf8)
     $psExe = (Get-Command powershell.exe).Source
     Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden | Out-Null
-    $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+    $State = Set-WatchLastForward -State $State -Line $Line
     $State = Set-WatchBoredActivity -State $State
     Write-WatchLog ('forward cursor session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
     return $State
@@ -1960,6 +2009,7 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($PSBoundParameters.ContainsKey('BoredRepeatSeconds')) { $workerArgs += @('-BoredRepeatSeconds', [string]$BoredRepeatSeconds) }
     if ($PSBoundParameters.ContainsKey('BoredAckStaleMinutes')) { $workerArgs += @('-BoredAckStaleMinutes', [string]$BoredAckStaleMinutes) }
     if ($PSBoundParameters.ContainsKey('BoredCheckSeconds')) { $workerArgs += @('-BoredCheckSeconds', [string]$BoredCheckSeconds) }
+    if ($PSBoundParameters.ContainsKey('ForwardDedupeSeconds')) { $workerArgs += @('-ForwardDedupeSeconds', [string]$ForwardDedupeSeconds) }
     if ($script:SeatType -and $script:SeatType -ne 'fleet') { $workerArgs += @('-SeatType', $script:SeatType) }
     if ($NoBored -or $script:NoBored) { $workerArgs += '-NoBored' }
     if ($script:WatchChannelOverride) { $workerArgs += @('-Channel', $script:WatchChannelOverride) }

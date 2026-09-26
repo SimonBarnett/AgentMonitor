@@ -44,6 +44,8 @@ Do not use talk-seat / bobiverse Watch homes (see playbook).
 
 **Loop seat (FR #103):** continuous non-job agents (e.g. ce-dayworks) use `-SeatType loop -Channel '#ce-priority-dev1' -Nick dayworks-dev1` (or `-NoBored`). That suppresses every `!bored` and the fleet ACK/DONE brief. Nick must **not** be `{machine}-{pid}` so Jeeves never assigns.
 
+**Forward dedupe (FR #105):** identical IRC `FROM` lines are skipped for `-ForwardDedupeSeconds` (default **60**), then forwarded again. Every skip is logged (`forward skipped (duplicate within …)`).
+
 ## Log (not in git)
 
 Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`
