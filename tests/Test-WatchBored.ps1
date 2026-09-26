@@ -147,6 +147,13 @@ Check 'AM100e prompt + loop wire mention monitor !bored' {
     if ($src -notmatch 'Jeeves assignment') { throw 'prompt must say Jeeves assignment = ASSIGN' }
 }
 
+Check 'AM100f BoredCheckSeconds <= 5 for DONE latency gate' {
+    $src = Get-Content -LiteralPath $path -Raw
+    if ($src -notmatch '\[int\]\$BoredCheckSeconds = 5') { throw 'default BoredCheckSeconds must be 5' }
+    if ($src -notmatch 'Start-Sleep -Seconds \$boredCheck') { throw 'watch loop must sleep BoredCheckSeconds (not only PollSeconds)' }
+    if ($src -notmatch 'Set-WatchBoredActivity') { throw 'forwards must reset idle via Set-WatchBoredActivity' }
+}
+
 if ($fail -gt 0) { Write-Host "Test-WatchBored: $fail failed"; exit 1 }
 Write-Host 'Test-WatchBored: all passed'
 exit 0
