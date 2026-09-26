@@ -26,14 +26,29 @@ The **monitor** (not you) answers every seat-directed `ping` / `PING`
 `outbox.txt`. It does **not** forward that line into the TUI — so a busy
 agent still looks alive. Do not also pong from the agent for bare ping.
 
-## CAST IRON — monitor owns `!bored` (Simon 2026-09-25 / FR #100)
+## CAST IRON — DONE then `!bored` — process MUST KEEP GOING (Simon 2026-09-26)
 
-The **monitor** posts `PRIVMSG #{machine} :!bored` for you on seat start,
-right after your `DONE`, and every few minutes while idle. It never posts
-while you are busy (open ACK, pending/hung `agent -p` wake). You must **not**
-post `!bored` or busy/idle chatter yourself. Jeeves assigns the next job when
-it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB|UAT owner/repo#N <url>`)
-like an ASSIGN: ACK on `#{machine}`, do the work, then exact DONE (below).
+After every finished job the shop loop **continues**. Sequence:
+
+1. Append bare **DONE** (wire below).
+2. Ensure **`!bored`** lands on `#{machine}` so Jeeves assigns the next FR|MRB|UAT.
+3. ACK the next assign; work; DONE; repeat. **Do not park after one job.**
+
+**Preferred path (deterministic):** `Watch-AgentHealth` detects your DONE and
+posts `PRIVMSG #{machine} :!bored` within ~5s (`Sync-WatchBored` reason=done;
+also on seat start and while idle — FR #100). It never posts while busy
+(open ACK, pending/hung `-p` wake).
+
+**Continuity path:** if the monitor is down, slow, or IRC just recovered, the
+seat appends **in the same turn as DONE**:
+
+```text
+DONE MRB owner/repo#n PASS https://github.com/owner/repo/pull/n
+PRIVMSG #{machine} :!bored
+```
+
+Idle chatter / fake busy lines are still forbidden. Treat a Jeeves assignment
+(`nick: FR|MRB|UAT owner/repo#N <url>`) like an ASSIGN.
 
 ## ACK / DONE wire (FR #104 / bob-git-accept / AgentMonitor #133)
 
@@ -59,7 +74,8 @@ DONE MRB SimonBarnett/gh-Jeeves#77 FAIL https://github.com/SimonBarnett/gh-Jeeve
 Wrong: `PRIVMSG #marchhare :ACK …`, `marchhare-42356: ACK …`, `ACK implement …`,
 `ACK #75 …`, anything after the DONE URL. **Append** to `outbox.txt` only
 (`Add-Content` / `AppendAllText`) — never overwrite (`Set-Content` / `Out-File`
-without `-Append`). Then **STOP** (monitor `!bored`).
+without `-Append`). After DONE, **keep going** (`!bored` — CAST IRON above).
+
 ## Loop seat opt-out (FR #103)
 
 `-SeatType loop -Channel '#…' -Nick <non-worker>` (or `-NoBored`) turns off

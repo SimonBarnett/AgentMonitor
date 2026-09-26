@@ -1692,14 +1692,14 @@ function Get-AgentPrompt {
         'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types here. Do not idle-wait in chat for the monitor; finish the turn after acting.'
         'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc; AgentMonitor playbooks stay in this repo.'
         "IRC home: $ResolvedIrcHome. Seat JOINs its own #{machine} ONLY (never #bobiverse or #agentic_irc; do not post there). Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
-        'CAST IRON !bored: the monitor posts PRIVMSG #{machine} :!bored for you on seat start, right after your DONE, and every few minutes while idle. Never while busy. Do not post !bored or busy/idle chatter yourself.'
+        'CAST IRON (Simon 2026-09-26): after every DONE the process MUST KEEP GOING — !bored on #{machine} so Jeeves assigns the next FR|MRB|UAT. Preferred: monitor posts PRIVMSG #{machine} :!bored within ~5s of DONE (also on start / idle). Continuity: if monitor is down, append PRIVMSG #{machine} :!bored in the same turn as DONE. Never while busy. No idle chatter.'
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
         "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you - treat a Jeeves assignment (FR|MRB|UAT owner/repo#N url) like an ASSIGN."
         'CAST IRON ACK/DONE wire (Jeeves ignores anything else): each outbox chat line must START with the keyword - no nick: prefix, no prose before ACK/DONE.'
         'ACK format (exact): ACK <FR|MRB|UAT> <owner/repo>#<n>   Example: ACK FR SimonBarnett/gh-Jeeves#74'
         'DONE format (exact, one line, ends at URL): DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>'
-        'Nothing after the URL on a DONE line. Fix notes go on a SEPARATE outbox line. Then STOP - never post !bored (monitor-only).'
+        'Nothing after the URL on a DONE line. Fix notes go on a SEPARATE outbox line. Then !bored (keep going) — do not park after one job.'
         'Outbox: APPEND only (Add-Content / AppendAllText). Never Set-Content / Out-File without -Append.'
         'CAST IRON (AgentMonitor #133): ACK/DONE are BARE lines only (keyword first). irc_agent say() posts them on #{machine}. Do NOT wrap ACK/DONE as PRIVMSG (no PRIVMSG #chan :ACK, no nick PM).'
         'Wrong: PRIVMSG-wrapped ACK/DONE, nick-prefixed ACK, or text after DONE URL. Right: ACK MRB owner/repo#n'
