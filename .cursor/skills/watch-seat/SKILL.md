@@ -24,8 +24,17 @@ The **monitor** posts `PRIVMSG #{machine} :!bored` for you on seat start,
 right after your `DONE`, and every few minutes while idle. It never posts
 while you are busy (open ACK, pending/hung `agent -p` wake). You must **not**
 post `!bored` or busy/idle chatter yourself. Jeeves assigns the next job when
-it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB owner/repo#N <url>`)
-like an ASSIGN: ACK on `#{machine}`, do the work, DONE.
+it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB|UAT owner/repo#N <url>`)
+like an ASSIGN: ACK on `#{machine}`, do the work, then exact DONE (below).
+
+## DONE wire (agentic_build #360 / bob-git-accept)
+
+Exactly one line, MODE = assigned TYPE, nothing after the URL:
+
+`DONE <MODE> <owner/repo>#<N> [PASS|FAIL] <PR-url>`
+
+Put fix PRs / SHAs / follow-ups on a **separate** outbox line. Then **STOP**
+(monitor sends the next `!bored`).
 
 ## Loop seat opt-out (FR #103)
 

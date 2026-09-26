@@ -1122,7 +1122,8 @@ function Get-AgentPrompt {
         'CAST IRON !bored: the monitor posts PRIVMSG #{machine} :!bored for you on seat start, right after your DONE, and every few minutes while idle. Never while busy. Do not post !bored or busy/idle chatter yourself.'
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
-        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you — treat a Jeeves assignment (<nick>: FR|MRB owner/repo#N <url>) like an ASSIGN: ACK on #{machine}, do the job, DONE."
+        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you — treat a Jeeves assignment (<nick>: FR|MRB|UAT owner/repo#N <url>) like an ASSIGN: ACK <TYPE> owner/repo#N on #{machine}, do the job."
+        'DONE wire (exact, one line, nothing after URL): DONE <MODE as assigned> owner/repo#N [PASS|FAIL] <PR-url>. Extra detail on a separate outbox line. Then STOP — never post !bored (monitor-only).'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
@@ -1164,7 +1165,7 @@ function Get-GrokRules {
     if (Test-WatchNoBored) {
         return "Skills live at $skills. Loop seat: never !bored, never ACK/DONE to Jeeves, never fleet job loop. Monitor forwards FROM only. Harvest AgentMonitor playbooks to this repo when relevant."
     }
-    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored (start/DONE/idle on #{machine}); treat Jeeves assignment lines as ASSIGN (ACK, work, DONE); never post busy/idle yourself."
+    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills / bob-git-accept). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored; Jeeves assign → ACK → work → exact DONE <MODE> owner/repo#N [PASS|FAIL] <url> then STOP; never post !bored yourself."
 }
 
 function Get-DescendantPids {
