@@ -65,8 +65,8 @@ function Get-WatchWorkerRows {
 }
 
 function Get-IrcAgentRows {
-    param([string]$Home)
-    $esc = [regex]::Escape([IO.Path]::GetFullPath($Home).TrimEnd('\'))
+    param([string]$SeatHomePath)
+    $esc = [regex]::Escape([IO.Path]::GetFullPath($SeatHomePath).TrimEnd('\'))
     return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
             $cl = [string]$_.CommandLine
             $cl -match 'irc_agent\.py' -and $cl -match $esc
@@ -74,8 +74,8 @@ function Get-IrcAgentRows {
 }
 
 function Get-IrcListenRows {
-    param([string]$Home)
-    $esc = [regex]::Escape([IO.Path]::GetFullPath($Home).TrimEnd('\'))
+    param([string]$SeatHomePath)
+    $esc = [regex]::Escape([IO.Path]::GetFullPath($SeatHomePath).TrimEnd('\'))
     return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
             $cl = [string]$_.CommandLine
             $cl -match 'irc_listen\.py' -and $cl -match $esc
@@ -83,8 +83,8 @@ function Get-IrcListenRows {
 }
 
 function Read-Coordinator {
-    param([string]$Home)
-    $path = Join-Path $Home 'coordinator.pid'
+    param([string]$SeatHomePath)
+    $path = Join-Path $SeatHomePath 'coordinator.pid'
     $doc = @{ nick = ''; seat = ''; agent = ''; irc_agent = ''; listen = '' }
     if (-not (Test-Path -LiteralPath $path)) { return $doc }
     foreach ($line in @(Get-Content -LiteralPath $path -ErrorAction SilentlyContinue)) {
@@ -117,9 +117,9 @@ function Get-LastWatchLogSignals {
 
 function Invoke-WatcherCheck {
     $workers = @(Get-WatchWorkerRows)
-    $agents = @(Get-IrcAgentRows -Home $IrcHome)
-    $listens = @(Get-IrcListenRows -Home $IrcHome)
-    $coord = Read-Coordinator -Home $IrcHome
+    $agents = @(Get-IrcAgentRows -SeatHomePath $IrcHome)
+    $listens = @(Get-IrcListenRows -SeatHomePath $IrcHome)
+    $coord = Read-Coordinator -SeatHomePath $IrcHome
     $seatAlive = Test-SeatAlive -Seat ([string]$coord.seat)
     $agentFieldIsHost = ($coord.agent -eq $coord.seat) -and ($coord.seat -ne '')
     $signals = Get-LastWatchLogSignals -LogPath $WatchLog
