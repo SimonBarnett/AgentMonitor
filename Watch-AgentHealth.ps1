@@ -61,7 +61,11 @@ param(
 
     # Open ACK without DONE older than this is treated as stale (not busy).
     [ValidateRange(5, 240)]
-    [int]$BoredAckStaleMinutes = 45
+    [int]$BoredAckStaleMinutes = 45,
+
+    # FR #100 acceptance: DONE -> !bored within ~5s (poll loop ticks this often for Sync-WatchBored).
+    [ValidateRange(1, 15)]
+    [int]$BoredCheckSeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,6 +75,7 @@ $script:CursorModel = ([string]$Model).Trim()
 $script:BoredIdleSeconds = [int]$BoredIdleSeconds
 $script:BoredRepeatSeconds = [int]$BoredRepeatSeconds
 $script:BoredAckStaleMinutes = [int]$BoredAckStaleMinutes
+$script:BoredCheckSeconds = [int]$BoredCheckSeconds
 
 function Get-CursorModelCliArgs {
     if (-not $script:CursorModel) { return @() }
@@ -1196,6 +1201,14 @@ function Send-WatchIrcPong {
     return $true
 }
 
+function Set-WatchBoredActivity {
+    # FR #100: reset idle clock on forward / seat activity so !bored does not fire mid-wake.
+    param($State, [datetime]$Now = $(Get-Date))
+    if (-not $State) { return $State }
+    $State | Add-Member -NotePropertyName 'boredIdleSinceUtc' -NotePropertyValue $Now -Force
+    return $State
+}
+
 function Get-WatchOutboxPayload {
     # Strip PRIVMSG prefix; return chat payload (ACK / DONE / !bored / …).
     param([string]$Line)
@@ -1502,6 +1515,7 @@ function Send-IrcLineToSession {
         $args = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull, '-r', $sid, '-p', $text)
         Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden | Out-Null
         $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+        $State = Set-WatchBoredActivity -State $State
         Write-WatchLog ('forward grok session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
         return $State
     }
@@ -1533,6 +1547,7 @@ function Send-IrcLineToSession {
     $psExe = (Get-Command powershell.exe).Source
     Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden | Out-Null
     $State | Add-Member -NotePropertyName 'lastForwardLine' -NotePropertyValue $Line -Force
+    $State = Set-WatchBoredActivity -State $State
     Write-WatchLog ('forward cursor session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
     return $State
     }
@@ -1857,6 +1872,10 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($PSBoundParameters.ContainsKey('CrashBackoffSeconds')) { $workerArgs += @('-CrashBackoffSeconds', [string]$CrashBackoffSeconds) }
     if ($PSBoundParameters.ContainsKey('LogPath')) { $workerArgs += @('-LogPath', $LogPath) }
     elseif ($script:LogFile) { $workerArgs += @('-LogPath', $script:LogFile) }
+    if ($PSBoundParameters.ContainsKey('BoredIdleSeconds')) { $workerArgs += @('-BoredIdleSeconds', [string]$BoredIdleSeconds) }
+    if ($PSBoundParameters.ContainsKey('BoredRepeatSeconds')) { $workerArgs += @('-BoredRepeatSeconds', [string]$BoredRepeatSeconds) }
+    if ($PSBoundParameters.ContainsKey('BoredAckStaleMinutes')) { $workerArgs += @('-BoredAckStaleMinutes', [string]$BoredAckStaleMinutes) }
+    if ($PSBoundParameters.ContainsKey('BoredCheckSeconds')) { $workerArgs += @('-BoredCheckSeconds', [string]$BoredCheckSeconds) }
     $log = $LogPath
     if (-not $log) { $log = $script:LogFile }
     if (-not $log) {
@@ -2057,11 +2076,14 @@ try {
             }
         }
 
+        # FR #100: tick at BoredCheckSeconds (default 5) so DONE->!bored meets the ~5s gate.
+        # IRC forward runs on the same tick (cheap irc.log tail).
+        $boredCheck = [int]$script:BoredCheckSeconds
+        if ($boredCheck -le 0) { $boredCheck = 5 }
         $state = Sync-IrcForward -State $state
-        # FR #100: after DONE / idle fallback !bored (suppressed while busy).
         $state = Sync-WatchBored -State $state -Mode poll
         Write-WatchState -Obj $state
-        Start-Sleep -Seconds $PollSeconds
+        Start-Sleep -Seconds $boredCheck
         }
         catch {
             Write-WatchLog ("watch loop error: $($_.Exception.Message)")
