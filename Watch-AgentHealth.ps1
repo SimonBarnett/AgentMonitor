@@ -151,7 +151,63 @@ if (-not $Grok -and -not $Cursor) {
     throw 'Pass --grok (agent.exe) or --cursor (agent.cmd).'
 }
 
+function Write-WatchBootstrapLog {
+    # FR #102: log before Resolve-AgentWorkspace / Write-WatchLog exist.
+    param([string]$Message)
+    $line = '{0:o} {1}' -f [datetime]::UtcNow, $Message
+    $paths = @(
+        (Join-Path $env:TEMP 'Watch-AgentHealth-start.log')
+    )
+    if ($script:LogFile) { $paths += $script:LogFile }
+    foreach ($p in $paths) {
+        try {
+            $dir = Split-Path -Parent $p
+            if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+                New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            }
+            Add-Content -LiteralPath $p -Value $line -Encoding utf8 -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+    try { Write-Host $line } catch { }
+}
+
+function Test-WatchFixedWritableDriveRoot {
+    # Physical fixed local disk (DriveType=3) that accepts create+delete of a probe file.
+    param([string]$Root)
+    if (-not $Root) { return $false }
+    $rootPath = [IO.Path]::GetFullPath($Root)
+    if ($rootPath -notmatch '^[A-Za-z]:\\$') { return $false }
+    $letter = $rootPath.Substring(0, 1).ToUpperInvariant()
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}:'" -f $letter) -ErrorAction SilentlyContinue
+    if (-not $disk) { return $false }
+    if ([int]$disk.DriveType -ne 3) { return $false } # 3 = local fixed disk
+    $probe = Join-Path $rootPath ('_wah_write_probe_' + [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($probe, 'ok')
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        try { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue } catch { }
+        return $false
+    }
+}
+
+function Get-WatchFixedDriveLetters {
+    # Simon 2026-09-25: letter order C, D, E, … — fixed local disks only.
+    $letters = @()
+    foreach ($disk in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
+        $id = [string]$disk.DeviceID
+        if ($id -match '^([A-Za-z]):$') {
+            $letters += $Matches[1].ToUpperInvariant()
+        }
+    }
+    return @($letters | Sort-Object)
+}
+
 function Resolve-AgentWorkspace {
+    # FR #102: fixed writable disks only; C first; never optical/network/rclone/read-only.
     param(
         [string]$Requested,
         [switch]$Explicit
@@ -160,26 +216,46 @@ function Resolve-AgentWorkspace {
         return [IO.Path]::GetFullPath($Requested)
     }
     $leaf = 'ai'
-    foreach ($letter in @('D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z')) {
+    $letters = @(Get-WatchFixedDriveLetters)
+    # Existing \ai: fixed disk only (DriveType=3). Do not require root writability —
+    # C:\ may deny create-in-root while C:\ai already exists and is usable.
+    foreach ($letter in $letters) {
         $root = '{0}:\' -f $letter
-        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}:'" -f $letter) -ErrorAction SilentlyContinue
+        if (-not $disk -or [int]$disk.DriveType -ne 3) { continue }
         $candidate = Join-Path $root $leaf
         if (Test-Path -LiteralPath $candidate) {
+            Write-WatchBootstrapLog ("workspace existing {0}" -f $candidate)
             return [IO.Path]::GetFullPath($candidate)
         }
     }
-    foreach ($letter in @('D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z')) {
+    foreach ($letter in $letters) {
         $root = '{0}:\' -f $letter
-        if (-not (Test-Path -LiteralPath $root)) { continue }
+        if (-not (Test-WatchFixedWritableDriveRoot -Root $root)) {
+            Write-WatchBootstrapLog ("workspace skip create on {0} (not writable fixed)" -f $root)
+            continue
+        }
         $candidate = Join-Path $root $leaf
-        New-Item -ItemType Directory -Force -Path $candidate | Out-Null
-        return [IO.Path]::GetFullPath($candidate)
+        try {
+            New-Item -ItemType Directory -Force -Path $candidate | Out-Null
+            Write-WatchBootstrapLog ("workspace created {0}" -f $candidate)
+            return [IO.Path]::GetFullPath($candidate)
+        }
+        catch {
+            Write-WatchBootstrapLog ("workspace create failed {0}: {1}" -f $candidate, $_.Exception.Message)
+        }
     }
-    throw 'No drive D:..Z: found to use or create \ai.'
+    throw 'No writable fixed local drive found to use or create \ai (C: first; never optical/network/rclone).'
 }
 
-$CwdExplicit = $PSBoundParameters.ContainsKey('Cwd') -and $Cwd
-$Cwd = Resolve-AgentWorkspace -Requested $Cwd -Explicit:$CwdExplicit
+try {
+    $CwdExplicit = $PSBoundParameters.ContainsKey('Cwd') -and $Cwd
+    $Cwd = Resolve-AgentWorkspace -Requested $Cwd -Explicit:$CwdExplicit
+}
+catch {
+    Write-WatchBootstrapLog ("fatal start: {0}" -f $_.Exception.Message)
+    throw
+}
 
 $script:KindName = $(if ($Cursor) { 'cursor' } else { 'grok' })
 $script:StateDir = Join-Path $env:USERPROFILE '.grok\agent-health'
@@ -1281,17 +1357,38 @@ function Ensure-WatchIrcSeat {
         $listens = @()
     }
     if ($agents.Count -gt 0 -and $listens.Count -gt 0) {
-        $nick = ''
-        if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
-        # Confirm agent command line is for THIS home only (already filtered, log for audit)
-        Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2} home={3}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
-        if ($nick) {
-            $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
-            if ($nick -match '-(\d+)$') {
-                $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue ([int]$Matches[1]) -Force
+        # FR #102: only treat as live if agent/listen PIDs are still running (Get-CimInstance rows
+        # can race; also rewrite coordinator.pid for this monitor seat).
+        $agentAlive = Test-WatchProcessAlive -ProcessId ([int]$agents[0].ProcessId)
+        $listenAlive = Test-WatchProcessAlive -ProcessId ([int]$listens[0].ProcessId)
+        if ($agentAlive -and $listenAlive) {
+            $nick = ''
+            if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
+            Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2} home={3}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
+            if ($nick) {
+                $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
+                if ($nick -match '-(\d+)$') {
+                    $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue ([int]$Matches[1]) -Force
+                }
             }
+            $coordPath = Join-Path $resolved 'coordinator.pid'
+            @(
+                "nick=$nick"
+                "seat=$PID"
+                "listen=$($listens[0].ProcessId)"
+                "agent=$($agents[0].ProcessId)"
+                "home=$resolved"
+                "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
+            ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+            return $State
         }
-        return $State
+        Write-WatchLog ("irc ensure stale live rows agentAlive={0} listenAlive={1} - relaunch" -f $agentAlive, $listenAlive)
+        foreach ($row in @($agents + $listens)) {
+            Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 400
+        $agents = @()
+        $listens = @()
     }
     $scripts = Resolve-AgenticIrcScriptsDir
     if (-not $scripts) {
