@@ -2933,32 +2933,13 @@ function Register-WatchWorkerProcess {
         $self = $PID
         $seatHome = Get-WatchBoundIrcHome
         if (-not $seatHome) { $seatHome = [string]$IrcHome }
-        # Retire stale workers on THIS slot only. Use taskkill with a short wait —
-        # Stop-Process can hang forever on zombie PIDs (marchhare 2026-09-26) and
-        # block Register before "watch worker online", leaving IRC with no drain.
+        # Do not kill sibling workers here. Stop-Process/taskkill on "stale" PIDs
+        # hung the register path on marchhare (never reached "watch worker online"),
+        # which dropped IRC drain. Claim the pid file; orphans die on next boot prune.
         foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
             $opid = [int]$row.ProcessId
             if ($opid -le 0 -or $opid -eq $self) { continue }
-            Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $seatHome)
-            try {
-                $tk = Start-Process -FilePath "$env:WINDIR\System32\taskkill.exe" -ArgumentList @('/F', '/PID', "$opid") -WindowStyle Hidden -PassThru
-                if ($tk) { [void]$tk.WaitForExit(2000) }
-            }
-            catch { }
-        }
-        if ($script:WorkerPidPath -and (Test-Path -LiteralPath $script:WorkerPidPath)) {
-            try {
-                $old = [int](Get-Content -LiteralPath $script:WorkerPidPath -Raw -ErrorAction Stop)
-            }
-            catch { $old = 0 }
-            if ($old -gt 0 -and $old -ne $self) {
-                Write-WatchLog "replacing previous watch worker pid=$old (this slot)"
-                try {
-                    $tk = Start-Process -FilePath "$env:WINDIR\System32\taskkill.exe" -ArgumentList @('/F', '/PID', "$old") -WindowStyle Hidden -PassThru
-                    if ($tk) { [void]$tk.WaitForExit(2000) }
-                }
-                catch { }
-            }
+            Write-WatchLog ("stale watch worker still listed pid={0} (same home {1}; not killing)" -f $opid, $seatHome)
         }
         if ($script:WorkerPidPath) {
             Set-Content -LiteralPath $script:WorkerPidPath -Value ([string]$self) -Encoding ascii -NoNewline
