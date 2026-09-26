@@ -583,6 +583,12 @@ function Reset-WatchSessionForNew {
     $State.sessionId = [guid]::NewGuid().ToString()
     $State.seenSession = $false
     $State.rootPid = 0
+    # FR #124: fresh -New must re-arm start !bored; stale DONE is re-seeded on Sync-WatchBored start.
+    $State | Add-Member -NotePropertyName 'boredStartSent' -NotePropertyValue $false -Force
+    $State | Add-Member -NotePropertyName 'boredLastDoneKey' -NotePropertyValue '' -Force
+    $State | Add-Member -NotePropertyName 'boredLastUtc' -NotePropertyValue $null -Force
+    $State | Add-Member -NotePropertyName 'boredLastReason' -NotePropertyValue '' -Force
+    $State | Add-Member -NotePropertyName 'boredIdleSinceUtc' -NotePropertyValue $null -Force
     if ($State.PSObject.Properties['ircLogOffset']) {
         $State.PSObject.Properties.Remove('ircLogOffset')
     }
@@ -1092,9 +1098,10 @@ function Test-ForbiddenIrcHome {
 function Initialize-WatchIrcHome {
     param($State)
     # FR #97: always bound home for this seat
-    $home = Get-WatchBoundIrcHome
-    if (-not $home) { $home = [string]$IrcHome }
-    $resolved = [IO.Path]::GetFullPath($home)
+    # FR #124: never assign to $home — PowerShell 5.1 $HOME is read-only/constant.
+    $boundHome = Get-WatchBoundIrcHome
+    if (-not $boundHome) { $boundHome = [string]$IrcHome }
+    $resolved = [IO.Path]::GetFullPath($boundHome)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         throw "Refusing IrcHome $resolved (talk-seat / Watch home). Use .agentic-irc-watch-*."
     }
@@ -1575,8 +1582,8 @@ function Get-AgentPrompt {
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
         "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you - treat a Jeeves assignment (FR|MRB|UAT owner/repo#N url) like an ASSIGN."
         'CAST IRON ACK/DONE wire (Jeeves ignores anything else): each outbox chat line must START with the keyword - no nick: prefix, no prose before ACK/DONE.'
-        'ACK format (exact): ACK FR|MRB|UAT owner/repo#n   Example: ACK FR SimonBarnett/gh-Jeeves#74'
-        'DONE format (exact, one line, ends at URL): DONE FR|MRB|UAT owner/repo#n PASS|FAIL PR-url'
+        'ACK format (exact): ACK <FR|MRB|UAT> <owner/repo>#<n>   Example: ACK FR SimonBarnett/gh-Jeeves#74'
+        'DONE format (exact, one line, ends at URL): DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>'
         'Nothing after the URL on a DONE line. Fix notes go on a SEPARATE outbox line. Then STOP - never post !bored (monitor-only).'
         'Outbox: APPEND only (Add-Content / AppendAllText). Never Set-Content / Out-File without -Append. Prefer: PRIVMSG #{machine} :<payload>'
         'Wrong: nick-prefixed ACK or text after DONE URL. Right: keyword first, assigned MODE, owner/repo#n, optional PASS|FAIL and URL.'
@@ -1984,7 +1991,12 @@ function Sync-WatchBored {
         $State | Add-Member -NotePropertyName 'boredLastDedupe' -NotePropertyValue $dedupe -Force
         $State | Add-Member -NotePropertyName 'boredLastReason' -NotePropertyValue $reason -Force
         $State.boredIdleSinceUtc = $Now
-        if ($reason -eq 'start') { $State.boredStartSent = $true }
+        if ($reason -eq 'start') {
+            $State.boredStartSent = $true
+            # FR #124: seed DONE key on start so a pre-restart DONE in outbox does not
+            # fire reason=done a few seconds later (stale completion → extra !bored).
+            if ($doneKey) { $State.boredLastDoneKey = $doneKey }
+        }
         if ($reason -eq 'done') { $State.boredLastDoneKey = $doneKey }
         $State | Add-Member -NotePropertyName 'boredOutboxLen' -NotePropertyValue (
             $(if (Test-Path -LiteralPath $outbox) { [int64](Get-Item -LiteralPath $outbox).Length } else { 0 })

@@ -133,24 +133,26 @@ Invoke-Case 'AM7 adopt live agent when rootPid+session match (FR#89)' {
     function script:Write-WatchLog { param([string]$Message) }
     Import-WatchFunctions -Names @('Test-WatchProcessAlive', 'Test-WatchRootMatchesSession', 'Try-AdoptLiveWatchAgent')
     $sid = '972c6563-d6ac-4d95-9a7d-0ec509d158a6'
+    # FR #124: session match requires a live rootPid — use $PID (32208 is usually dead on CI).
+    $me = $PID
     $cl = "C:\x\agent.exe --cwd D:\ai -r $sid prompt"
-    if (-not (Test-WatchRootMatchesSession -RootPid 32208 -SessionId $sid -CommandLine $cl)) {
+    if (-not (Test-WatchRootMatchesSession -RootPid $me -SessionId $sid -CommandLine $cl)) {
         throw 'matching session in command line must adopt'
     }
-    if (Test-WatchRootMatchesSession -RootPid 32208 -SessionId $sid -CommandLine 'agent.exe -r other-session') {
+    if (Test-WatchRootMatchesSession -RootPid $me -SessionId $sid -CommandLine 'agent.exe -r other-session') {
         throw 'wrong session must not match'
     }
     if (Test-WatchRootMatchesSession -RootPid 0 -SessionId $sid -CommandLine $cl) {
         throw 'rootPid 0 must not match'
     }
-    # Dead pid: use unlikely pid
-    if (Test-WatchRootMatchesSession -RootPid 1 -SessionId $sid -CommandLine $cl) {
-        # pid 1 may or may not exist on Windows — only fail if process is alive AND we claimed match without alive check
-        # Test-WatchRootMatchesSession requires alive; if System Idle/pid1 missing, OK
+    # Dead / missing pid must not match even with session in CL
+    $deadPid = 2147483646
+    if (Test-WatchProcessAlive -ProcessId $deadPid) {
+        throw "test fixture pid $deadPid unexpectedly alive"
     }
-    $state = [pscustomobject]@{ kind = 'grok'; sessionId = $sid; rootPid = 32208; seenSession = $true }
-    # Force match path with explicit command line by mocking alive via current process
-    $me = $PID
+    if (Test-WatchRootMatchesSession -RootPid $deadPid -SessionId $sid -CommandLine $cl) {
+        throw 'dead rootPid must not match even when CL contains session'
+    }
     $state2 = [pscustomobject]@{ kind = 'grok'; sessionId = $sid; rootPid = $me; seenSession = $true }
     $clMe = "fake-agent.exe -r $sid --cwd D:\ai"
     $adopted = Try-AdoptLiveWatchAgent -State $state2 -CommandLine $clMe
