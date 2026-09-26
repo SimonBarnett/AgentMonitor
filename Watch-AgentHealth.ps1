@@ -1170,8 +1170,20 @@ function Get-WatchIrcListenRows {
 function Resolve-WatchSeatPid {
     # coordinator.pid outlives the seat that wrote it. A dead seat= pid gives the new irc_agent the
     # talk-seat nick <mid>-<deadpid>; irc_agent's seat liveness loop then QUITs ("seat ended").
-    # Honour seat= only while that process is running; otherwise this watcher is the seat.
-    param([string]$CoordPath, [int]$Default = $PID)
+    # Prefer live TUI rootPid, then live coordinator seat=, else this watcher ($Default).
+    # CAST IRON (AgentMonitor #136): nick suffix MUST equal a live seat PID.
+    param(
+        [string]$CoordPath,
+        [int]$Default = $PID,
+        $State = $null
+    )
+    if ($State) {
+        $rp = 0
+        try { $rp = [int]$State.rootPid } catch { $rp = 0 }
+        if ($rp -gt 0 -and (Get-Process -Id $rp -ErrorAction SilentlyContinue)) {
+            return $rp
+        }
+    }
     if ($CoordPath -and (Test-Path -LiteralPath $CoordPath)) {
         foreach ($line in @(Get-Content -LiteralPath $CoordPath -ErrorAction SilentlyContinue)) {
             if ($line -match '^seat=(\d+)\s*$') {
@@ -1255,12 +1267,18 @@ function Resolve-StableWatchIrcNick {
     if ($agents.Count -eq 0 -and $ResolvedHome) {
         $agents = @(Get-WatchIrcAgentRows -ResolvedHome $ResolvedHome)
     }
+    # Live irc_agent already holding a nick: keep only if that nick's suffix PID is still alive
+    # (otherwise seat liveness will PART "seat ended" — AgentMonitor #136).
     foreach ($row in $agents) {
         $cl = [string]$row.CommandLine
         if ($cl -match '--nick\s+(\S+)') {
             $n = $Matches[1].Trim()
             if ($n -match ('^{0}-(\d+)$' -f [regex]::Escape($mid))) {
-                return $n
+                $suf = [int]$Matches[1]
+                if ($suf -gt 0 -and (Get-Process -Id $suf -ErrorAction SilentlyContinue)) {
+                    return $n
+                }
+                Write-WatchLog ("irc nick {0} suffix pid dead; will re-nick to live seat" -f $n)
             }
         }
     }
@@ -1269,25 +1287,26 @@ function Resolve-StableWatchIrcNick {
         $prev = ([string]$State.ircNick).Trim()
     }
     if ($prev -match ('^{0}-(\d+)$' -f [regex]::Escape($mid))) {
-        # Prefer previous nick when seatNickPid is stored (monitor hotpatch) even if agent is briefly down —
-        # Ensure still reuses the same nick number so the seat identity does not flip.
-        $stored = 0
-        if ($State.PSObject.Properties['seatNickPid']) {
-            try { $stored = [int]$State.seatNickPid } catch { $stored = 0 }
-        }
         $suffix = [int]$Matches[1]
-        if ($stored -gt 0 -and $stored -eq $suffix) {
+        if ($suffix -gt 0 -and (Get-Process -Id $suffix -ErrorAction SilentlyContinue)) {
             return $prev
         }
-        if ($stored -gt 0) {
-            return ('{0}-{1}' -f $mid, $stored)
+        Write-WatchLog ("irc ensure dropping stale nick {0} (suffix not running)" -f $prev)
+    }
+    # Prefer live rootPid (TUI) over stored seatNickPid / monitor PID.
+    if ($State) {
+        $rp = 0
+        try { $rp = [int]$State.rootPid } catch { $rp = 0 }
+        if ($rp -gt 0 -and (Get-Process -Id $rp -ErrorAction SilentlyContinue)) {
+            return ('{0}-{1}' -f $mid, $rp)
         }
-        return $prev
     }
     if ($State -and $State.PSObject.Properties['seatNickPid']) {
         try {
             $sp = [int]$State.seatNickPid
-            if ($sp -gt 0) { return ('{0}-{1}' -f $mid, $sp) }
+            if ($sp -gt 0 -and (Get-Process -Id $sp -ErrorAction SilentlyContinue)) {
+                return ('{0}-{1}' -f $mid, $sp)
+            }
         }
         catch { }
     }
@@ -1424,16 +1443,25 @@ function Ensure-WatchIrcSeat {
     }
     $mid = Get-WatchMachineId
     $coordPath = Join-Path $resolved 'coordinator.pid'
-    $seatPid = Resolve-WatchSeatPid -CoordPath $coordPath -Default $PID
+    # Live seat first (TUI rootPid), then coordinator, then this monitor (#136).
+    $seatPid = Resolve-WatchSeatPid -CoordPath $coordPath -Default $PID -State $State
     if ($agents.Count -eq 0) {
         Clear-WatchStaleQuitRequest -ResolvedHome $resolved
     }
-    # FR #89: stable nick across monitor restart (do not flip to new monitor PID while seat is known).
+    # Nick suffix must equal a LIVE seat PID (irc_agent watch_seat_host_ok / seat liveness).
     $nick = Resolve-StableWatchIrcNick -State $State -MachineId $mid -ResolvedHome $resolved -DefaultSeatPid $seatPid -AgentRows $agents
     if ($nick -match '-(\d+)$') {
-        $seatPid = [int]$Matches[1]
-        $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue $seatPid -Force
+        $nickPid = [int]$Matches[1]
+        if ($nickPid -gt 0 -and (Get-Process -Id $nickPid -ErrorAction SilentlyContinue)) {
+            $seatPid = $nickPid
+        }
+        else {
+            # Dead suffix — force re-nick to live seatPid (do not copy dead pid into SEAT_PID).
+            $nick = ('{0}-{1}' -f $mid.ToLowerInvariant(), $seatPid)
+            Write-WatchLog ("irc ensure re-nick to {0} (live seat)" -f $nick)
+        }
     }
+    $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue $seatPid -Force
     $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
     $channels = Get-WatchSeatChannels -MachineId $mid
     $env:AGENTIC_IRC_PASSWORD = (Get-Content -LiteralPath $pwFile -Raw).Trim()
@@ -1447,8 +1475,17 @@ function Ensure-WatchIrcSeat {
     $agentPath = Join-Path $scripts 'irc_agent.py'
     $listenPath = Join-Path $scripts 'irc_listen.py'
     $didConnect = $false
+    # Write coordinator BEFORE starting irc_agent so liveness/nick checks see live seat= (#136).
+    @(
+        "nick=$nick"
+        "seat=$seatPid"
+        'listen='
+        'agent='
+        "home=$resolved"
+        "channels=$channels"
+    ) | Set-Content -LiteralPath $coordPath -Encoding utf8
     if ($agents.Count -eq 0) {
-        Write-WatchLog ("irc ensure start agent nick={0} channels={1} home={2}" -f $nick, $channels, $resolved)
+        Write-WatchLog ("irc ensure start agent nick={0} seat={1} channels={2} home={3}" -f $nick, $seatPid, $channels, $resolved)
         Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @(
                 '-u', $agentPath,
                 '--host', 'irc.ntsa.uk',
