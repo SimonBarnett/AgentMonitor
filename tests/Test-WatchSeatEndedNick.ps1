@@ -1,4 +1,4 @@
-# AgentMonitor #136: never keep dead nick suffix; prefer live rootPid; write seat= before agent start.
+﻿# AgentMonitor #136: never keep dead nick suffix; prefer live rootPid; write seat= before agent start.
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $path = Join-Path $RepoRoot 'Watch-AgentHealth.ps1'
@@ -57,10 +57,10 @@ Check 'AM136c Ensure writes coordinator before start agent' {
 
 Check 'AM137 leave IRC when TUI still alive on watch stop' {
     $src = Get-Content -LiteralPath $path -Raw
-    if ($src -notmatch 'TUI rootPid=.*still alive — leave IRC up') {
+    if ($src -notmatch 'TUI rootPid=.*still alive â€” leave IRC up') {
         throw 'finally must leave IRC when TUI alive'
     }
-    if ($src -notmatch 'Alive PID is enough for grok') {
+    if ($src -notmatch 'only check the TUI root PID') {
         throw 'Test-TreeHealthy must not use Responding for grok'
     }
 }
@@ -68,4 +68,5 @@ Check 'AM137 leave IRC when TUI still alive on watch stop' {
 if ($fail -gt 0) { Write-Host "Test-WatchSeatEndedNick: $fail failed"; exit 1 }
 Write-Host 'Test-WatchSeatEndedNick: all passed'
 exit 0
+
 

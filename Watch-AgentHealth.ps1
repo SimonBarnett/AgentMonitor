@@ -1771,6 +1771,12 @@ function Get-DescendantPids {
 function Test-TreeHealthy {
     param([int]$RootPid)
     if ($RootPid -le 0) { return $false }
+    # Grok: only check the TUI root PID. Full Win32_Process descendant scans hang the
+    # monitor on busy boxes; Responding=$false is also a false unhealthy for console hosts.
+    # False unhealthy → Complete-WatchSeatRootExit → Disconnect-WatchIrc (IRC lost).
+    if ($script:KindName -eq 'grok' -or [bool]$Grok) {
+        return $null -ne (Get-Process -Id $RootPid -ErrorAction SilentlyContinue)
+    }
     $ids = Get-DescendantPids -RootPid $RootPid
     $alive = @()
     foreach ($id in $ids) {
@@ -1778,12 +1784,6 @@ function Test-TreeHealthy {
         if ($gp) { $alive += $gp }
     }
     if ($alive.Count -eq 0) { return $false }
-    # Grok/Cursor console hosts often report Responding=$false on Windows even when
-    # healthy. Treating that as "unhealthy" called Complete-WatchSeatRootExit →
-    # Disconnect-WatchIrc (IRC drop while TUI still up). Alive PID is enough for grok.
-    if ($script:KindName -eq 'grok' -or [bool]$Grok) {
-        return $true
-    }
     $stuck = @($alive | Where-Object { $_.Responding -eq $false })
     if ($stuck.Count -gt 0 -and $stuck.Count -eq $alive.Count) { return $false }
     return $true
