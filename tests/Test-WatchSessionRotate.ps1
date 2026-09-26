@@ -126,7 +126,7 @@ Check 'AM99d source documents FR99 rotation' {
     if ($src -notmatch 'oversized-archive-failed|archive-failed') { throw 'must soft-fail locked archive and keep forward' }
 }
 
-Check 'AM99e locked updates.jsonl archive fails soft; still rotates session id' {
+Check 'AM99e locked updates.jsonl archive fails soft; keeps session id for forward' {
     function Write-WatchLog { param([string]$Message) }
     function Write-WatchSessionHealthReport { param($Kind, $Event, $Fields) }
     $root = Join-Path ([IO.Path]::GetTempPath()) ('am99e-' + [guid]::NewGuid().ToString('N'))
@@ -155,7 +155,7 @@ Check 'AM99e locked updates.jsonl archive fails soft; still rotates session id' 
         New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
         $st = [pscustomobject]@{ sessionId = $sid; seenSession = $true }
         $st2 = Ensure-WatchSessionBeforeResume -State $st -WorkDir $cwd -Kind 'grok'
-        if ($st2.sessionId -eq $sid) { throw 'must mint new session id even when archive Move-Item fails' }
+        if ($st2.sessionId -ne $sid) { throw 'archive-failed must keep session id so visible TUI still receives -p' }
         if ($st2.lastSessionRotateReason -ne 'oversized-archive-failed') {
             throw "lastSessionRotateReason=$($st2.lastSessionRotateReason)"
         }
