@@ -38,6 +38,10 @@ On **Restricted** ExecutionPolicy, use these `.cmd` wrappers (`-ExecutionPolicy 
 
 Do not use talk-seat / bobiverse Watch homes (see playbook).
 
+**Channels:** each watch seat JOINs its own `#{machine}` only (never `#bobiverse` / `#agentic_irc`).
+
+**`!bored` (FR #100):** the monitor posts `PRIVMSG #{machine} :!bored` on seat start, right after the seat's `DONE`, and every few minutes while idle — never while busy (open ACK or pending `agent -p`). No LLM turn. Jeeves assigns the next job; the seat ACKs.
+
 ## Log (not in git)
 
 Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`

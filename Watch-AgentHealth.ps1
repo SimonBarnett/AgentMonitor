@@ -49,13 +49,28 @@ param(
     [string]$IrcHome,
     [int]$PollSeconds = 15,
     [int]$CrashBackoffSeconds = 20,
-    [string]$LogPath
+    [string]$LogPath,
+
+    # FR #100: monitor-owned !bored (no LLM). First idle fire after this many seconds.
+    [ValidateRange(60, 600)]
+    [int]$BoredIdleSeconds = 120,
+
+    # FR #100: repeat !bored while still idle (2–5 min window; default 3 min).
+    [ValidateRange(120, 300)]
+    [int]$BoredRepeatSeconds = 180,
+
+    # Open ACK without DONE older than this is treated as stale (not busy).
+    [ValidateRange(5, 240)]
+    [int]$BoredAckStaleMinutes = 45
 )
 
 $ErrorActionPreference = 'Stop'
 
 $script:AgentTuiWindowStyle = $(if ($Windows -eq 'on') { 'Normal' } else { 'Hidden' })
 $script:CursorModel = ([string]$Model).Trim()
+$script:BoredIdleSeconds = [int]$BoredIdleSeconds
+$script:BoredRepeatSeconds = [int]$BoredRepeatSeconds
+$script:BoredAckStaleMinutes = [int]$BoredAckStaleMinutes
 
 function Get-CursorModelCliArgs {
     if (-not $script:CursorModel) { return @() }
@@ -1004,7 +1019,8 @@ function Get-CursorSeedPrompt {
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
         "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (own #{machine} channel only)."
-        'You are NOT on IRC by reading irc.log or counting processes â€” you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
+        'Monitor posts !bored for you on start, after DONE, and while idle (own #{machine} only). Do not post busy/idle status yourself.'
+        'You are NOT on IRC by reading irc.log or counting processes — you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
 
@@ -1017,9 +1033,10 @@ function Get-AgentPrompt {
         'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types here. Do not idle-wait in chat for the monitor; finish the turn after acting.'
         'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc; AgentMonitor playbooks stay in this repo.'
         "IRC home: $ResolvedIrcHome. Seat JOINs its own #{machine} ONLY (never #bobiverse or #agentic_irc; do not post there). Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
+        'CAST IRON !bored: the monitor posts PRIVMSG #{machine} :!bored for you on seat start, right after your DONE, and every few minutes while idle. Never while busy. Do not post !bored or busy/idle chatter yourself.'
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
-        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you (ASSIGN = your job: ACK on that channel, then do it)."
+        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you — treat a Jeeves assignment (<nick>: FR|MRB owner/repo#N <url>) like an ASSIGN: ACK on #{machine}, do the job, DONE."
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
@@ -1058,7 +1075,7 @@ function ConvertTo-WatchProcessArgumentString {
 
 function Get-GrokRules {
     $skills = Join-Path $env:USERPROFILE '.grok\skills'
-    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc."
+    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored (start/DONE/idle on #{machine}); treat Jeeves assignment lines as ASSIGN (ACK, work, DONE); never post busy/idle yourself."
 }
 
 function Get-DescendantPids {
@@ -1177,6 +1194,242 @@ function Send-WatchIrcPong {
     [IO.File]::AppendAllText($outbox, $line + "`n", (New-Object System.Text.UTF8Encoding $false))
     Write-WatchLog ('auto-pong {0} -> {1} (watcher; no agent wake)' -f $Nick, $Target)
     return $true
+}
+
+function Get-WatchOutboxPayload {
+    # Strip PRIVMSG prefix; return chat payload (ACK / DONE / !bored / …).
+    param([string]$Line)
+    $t = ([string]$Line).Trim()
+    if ($t -match '^PRIVMSG\s+\S+\s+:(.*)$') { return $Matches[1].Trim() }
+    return $t
+}
+
+function Get-WatchOutboxRows {
+    param([string]$OutboxPath)
+    if (-not $OutboxPath -or -not (Test-Path -LiteralPath $OutboxPath)) { return @() }
+    return @(Get-Content -LiteralPath $OutboxPath -Encoding UTF8 -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '\S' })
+}
+
+function Test-WatchSeatOpenAck {
+    # Busy when last ACK is after last DONE and outbox is younger than stale window.
+    param(
+        [string]$OutboxPath,
+        [int]$AckStaleMinutes = 45,
+        [datetime]$Now = $(Get-Date)
+    )
+    $rows = @(Get-WatchOutboxRows -OutboxPath $OutboxPath)
+    $ackIx = -1
+    $doneIx = -1
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $payload = Get-WatchOutboxPayload -Line $rows[$i]
+        if ($payload -match '^(?i)ACK\b') { $ackIx = $i }
+        elseif ($payload -match '^(?i)DONE\b') { $doneIx = $i }
+    }
+    if ($ackIx -le $doneIx) { return $false }
+    if (-not (Test-Path -LiteralPath $OutboxPath)) { return $false }
+    $ageMin = ($Now - (Get-Item -LiteralPath $OutboxPath).LastWriteTime).TotalMinutes
+    return ($ageMin -lt [double]$AckStaleMinutes)
+}
+
+function Test-WatchAgentWakeBusy {
+    # Pending / hung agent -p wake for this seat session (Cursor or Grok).
+    param(
+        [string]$SessionId,
+        [switch]$GrokKind
+    )
+    $sid = ([string]$SessionId).Trim()
+    if ($GrokKind) {
+        if (-not $sid) { return $false }
+        $pat = [regex]::Escape($sid)
+        $rows = @(Get-CimInstance Win32_Process -Filter "Name='agent.exe'" -ErrorAction SilentlyContinue)
+        foreach ($row in $rows) {
+            $cl = [string]$row.CommandLine
+            if ($cl -match (' -r\s+' + $pat + '\b') -and $cl -match ' -p(\s|$)') { return $true }
+        }
+        return $false
+    }
+    return (Test-CursorAgentForwardBusy -SessionId $sid)
+}
+
+function Test-WatchSeatBoredBusy {
+    param(
+        $State,
+        [string]$OutboxPath,
+        [datetime]$Now = $(Get-Date)
+    )
+    $stale = 45
+    if ($script:BoredAckStaleMinutes) { $stale = [int]$script:BoredAckStaleMinutes }
+    if (Test-WatchSeatOpenAck -OutboxPath $OutboxPath -AckStaleMinutes $stale -Now $Now) { return $true }
+    $sid = ''
+    if ($State -and $State.sessionId) { $sid = [string]$State.sessionId }
+    $grokKind = $false
+    if ($script:KindName -eq 'grok') { $grokKind = $true }
+    elseif ($Grok) { $grokKind = $true }
+    if (Test-WatchAgentWakeBusy -SessionId $sid -GrokKind:$grokKind) { return $true }
+    return $false
+}
+
+function Get-WatchBoredChannel {
+    # CAST IRON: !bored only in own #{machine}. Never #bobiverse / #agentic_irc / nick PRIVMSG.
+    param([string]$MachineId = '')
+    $mid = ([string]$MachineId).Trim()
+    if (-not $mid) { $mid = Get-WatchMachineId }
+    return (Get-WatchSeatChannels -MachineId $mid)
+}
+
+function Send-WatchIrcBored {
+    # Deterministic outbox writer (no LLM). Always PRIVMSG #{machine} :!bored.
+    param(
+        [string]$IrcHome,
+        [string]$Channel,
+        [string]$Reason = 'idle',
+        [string]$OurNick = ''
+    )
+    if (-not $IrcHome) { return $false }
+    $chan = ([string]$Channel).Trim().ToLowerInvariant()
+    if (-not $chan) { return $false }
+    if ($chan -notmatch '^#[a-z0-9_-]+$') { return $false }
+    if ($chan -match '(?i)^#(bobiverse|agentic_irc)$') {
+        Write-WatchLog ('bored refused channel={0} (own #{{machine}} only)' -f $chan)
+        return $false
+    }
+    if ($chan -notmatch '^#') { return $false }
+    # Never PRIVMSG a nick (no leading #).
+    New-Item -ItemType Directory -Force -Path $IrcHome | Out-Null
+    $outbox = Join-Path $IrcHome 'outbox.txt'
+    $line = 'PRIVMSG {0} :!bored' -f $chan
+    $pre = ''
+    if (Test-Path -LiteralPath $outbox) {
+        $bytes = [IO.File]::ReadAllBytes($outbox)
+        if ($bytes.Length -gt 0 -and $bytes[$bytes.Length - 1] -ne 10) { $pre = "`n" }
+    }
+    [IO.File]::AppendAllText($outbox, $pre + $line + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $who = if ($OurNick) { $OurNick } else { '?' }
+    Write-WatchLog ('bored -> {0} nick={1} reason={2}' -f $chan, $who, $Reason)
+    return $true
+}
+
+function Get-WatchOutboxDoneKey {
+    # Stable key = DONE payload only (must not include outbox length — appending !bored
+    # would change the key and re-fire reason=done every poll).
+    param([string]$OutboxPath)
+    $rows = @(Get-WatchOutboxRows -OutboxPath $OutboxPath)
+    for ($i = $rows.Count - 1; $i -ge 0; $i--) {
+        $payload = Get-WatchOutboxPayload -Line $rows[$i]
+        if ($payload -match '^(?i)DONE\b') {
+            return $payload
+        }
+    }
+    return ''
+}
+
+function Sync-WatchBored {
+    # FR #100: monitor emits !bored on start, after DONE, and while idle — never while busy.
+    # Works with zero model tokens. Own #{machine} only.
+    param(
+        $State,
+        [ValidateSet('poll', 'start')]
+        [string]$Mode = 'poll',
+        [datetime]$Now = $(Get-Date)
+    )
+    if (-not $State) { return $State }
+    $seatHome = [string]$State.ircHome
+    if (-not $seatHome) { return $State }
+    $resolved = [IO.Path]::GetFullPath($seatHome)
+    if (Test-ForbiddenIrcHome -ResolvedHome $resolved) { return $State }
+
+    $ourNick = Get-WatchSeatNick -State $State
+    $mid = Get-WatchMachineId
+    $channel = Get-WatchBoredChannel -MachineId $mid
+    $outbox = Join-Path $resolved 'outbox.txt'
+
+    if (-not ($State.PSObject.Properties.Name -contains 'boredLastUtc')) {
+        $State | Add-Member -NotePropertyName 'boredLastUtc' -NotePropertyValue $null -Force
+    }
+    if (-not ($State.PSObject.Properties.Name -contains 'boredLastDoneKey')) {
+        $State | Add-Member -NotePropertyName 'boredLastDoneKey' -NotePropertyValue '' -Force
+    }
+    if (-not ($State.PSObject.Properties.Name -contains 'boredStartSent')) {
+        $State | Add-Member -NotePropertyName 'boredStartSent' -NotePropertyValue $false -Force
+    }
+    if (-not ($State.PSObject.Properties.Name -contains 'boredIdleSinceUtc')) {
+        $State | Add-Member -NotePropertyName 'boredIdleSinceUtc' -NotePropertyValue $null -Force
+    }
+
+    $busy = Test-WatchSeatBoredBusy -State $State -OutboxPath $outbox -Now $Now
+    if ($busy) {
+        $State.boredIdleSinceUtc = $null
+        return $State
+    }
+
+    # Activity: any new outbox line resets idle clock.
+    $outLen = 0
+    if (Test-Path -LiteralPath $outbox) { $outLen = [int64](Get-Item -LiteralPath $outbox).Length }
+    $prevLen = 0
+    if ($State.PSObject.Properties.Name -contains 'boredOutboxLen') { $prevLen = [int64]$State.boredOutboxLen }
+    if ($outLen -ne $prevLen) {
+        $State | Add-Member -NotePropertyName 'boredOutboxLen' -NotePropertyValue $outLen -Force
+        # Growing outbox while not busy still counts as seat activity (ACK/DONE/chatter).
+        if ($Mode -eq 'poll' -and $outLen -gt $prevLen) {
+            $State.boredIdleSinceUtc = $Now
+        }
+    }
+    elseif (-not $State.boredIdleSinceUtc) {
+        $State.boredIdleSinceUtc = $Now
+    }
+
+    $reason = $null
+    $doneKey = Get-WatchOutboxDoneKey -OutboxPath $outbox
+    if ($Mode -eq 'start' -and -not [bool]$State.boredStartSent) {
+        $reason = 'start'
+    }
+    elseif ($doneKey -and $doneKey -ne [string]$State.boredLastDoneKey) {
+        $reason = 'done'
+    }
+    else {
+        $idleSec = [int]$script:BoredIdleSeconds
+        if ($idleSec -le 0) { $idleSec = 120 }
+        $repSec = [int]$script:BoredRepeatSeconds
+        if ($repSec -le 0) { $repSec = 180 }
+        $idleSince = $State.boredIdleSinceUtc
+        if (-not $idleSince) { $idleSince = $Now; $State.boredIdleSinceUtc = $Now }
+        $idleFor = ($Now - [datetime]$idleSince).TotalSeconds
+        $sinceBored = 999999.0
+        if ($State.boredLastUtc) {
+            $sinceBored = ($Now - [datetime]$State.boredLastUtc).TotalSeconds
+        }
+        # First idle after start/DONE uses BoredIdleSeconds; repeats use BoredRepeatSeconds.
+        $threshold = $idleSec
+        if (($State.PSObject.Properties.Name -contains 'boredLastReason') -and [string]$State.boredLastReason -eq 'idle') {
+            $threshold = $repSec
+        }
+        if ($idleFor -ge $idleSec -and $sinceBored -ge $threshold) {
+            $reason = 'idle'
+        }
+    }
+
+    if (-not $reason) { return $State }
+
+    # Dedupe: at most one line per second for same reason+channel (second process / re-entry).
+    $dedupe = '{0}|{1}|{2}' -f $channel, $reason, $Now.ToString('yyyyMMddHHmmss')
+    if (($State.PSObject.Properties.Name -contains 'boredLastDedupe') -and [string]$State.boredLastDedupe -eq $dedupe) {
+        return $State
+    }
+
+    $ok = Send-WatchIrcBored -IrcHome $resolved -Channel $channel -Reason $reason -OurNick $ourNick
+    if ($ok) {
+        $State.boredLastUtc = $Now
+        $State | Add-Member -NotePropertyName 'boredLastDedupe' -NotePropertyValue $dedupe -Force
+        $State | Add-Member -NotePropertyName 'boredLastReason' -NotePropertyValue $reason -Force
+        $State.boredIdleSinceUtc = $Now
+        if ($reason -eq 'start') { $State.boredStartSent = $true }
+        if ($reason -eq 'done') { $State.boredLastDoneKey = $doneKey }
+        $State | Add-Member -NotePropertyName 'boredOutboxLen' -NotePropertyValue (
+            $(if (Test-Path -LiteralPath $outbox) { [int64](Get-Item -LiteralPath $outbox).Length } else { 0 })
+        ) -Force
+    }
+    return $State
 }
 
 function Test-WatchIrcAddressedToNick {
@@ -1709,6 +1962,8 @@ $state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:Cl
 [void](Clear-OrphanWatchProcessesOnStart -ResolvedHome ([string]$state.ircHome))
 # After orphan prune: always (re)connect IRC for this watch home (systray CAST IRON).
 $state = Ensure-WatchIrcSeat -State $state
+# FR #100: claim work immediately (deterministic !bored; no LLM).
+$state = Sync-WatchBored -State $state -Mode start
 if ($WatchWorker) {
     Register-WatchWorkerProcess
 }
@@ -1803,6 +2058,8 @@ try {
         }
 
         $state = Sync-IrcForward -State $state
+        # FR #100: after DONE / idle fallback !bored (suppressed while busy).
+        $state = Sync-WatchBored -State $state -Mode poll
         Write-WatchState -Obj $state
         Start-Sleep -Seconds $PollSeconds
         }
