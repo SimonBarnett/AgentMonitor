@@ -32,6 +32,26 @@ Pass exactly one of `-Grok` / `-Cursor` (or `grok` / `cursor` on the main `.cmd`
 
 ---
 
+## Loop seat (non-job continuous agent, FR #103)
+
+For agents that must **not** join the fleet job loop (example: ce-dayworks on CE-PRIORITY-DEV1):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Watch-AgentHealth.ps1 `
+  -Grok -New -SeatType loop `
+  -Channel '#ce-priority-dev1' -Nick 'dayworks-dev1' `
+  -IrcHome "$env:USERPROFILE\.agentic-irc-watch-dayworks"
+```
+
+- `-SeatType loop` implies `-NoBored`: monitor never posts `!bored`.
+- Brief/prompt has no ASSIGN / ACK / DONE-to-Jeeves instructions.
+- `-Nick` must **not** match `{machine}-{pid}` (Jeeves only trusts that grammar for assign/busy).
+- Still: health, crash-backoff, IRC FROM forward for that channel only.
+
+Default fleet seats are unchanged (`-SeatType fleet`).
+
+---
+
 ## Resume vs `new`
 
 - **Default / `new` (CAST IRON for UI):** Desktop shortcuts, tray Agents / TipForm agent icons, and `Watch-AgentHealth.cmd <kind>` without `resume` always start a **fresh** `sessionId` with full skills + seed prompt. Legacy `*Resume*` shortcut **names** still pass `-New`.

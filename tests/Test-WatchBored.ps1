@@ -30,6 +30,7 @@ foreach ($n in @(
         'Test-WatchAgentWakeBusy',
         'Test-CursorAgentForwardBusy',
         'Get-WatchSeatNick',
+        'Test-WatchNoBored',
         'Sync-WatchBored'
     )) {
     . ([scriptblock]::Create((Get-Fn $n).Extent.Text))
@@ -43,6 +44,9 @@ $script:BoredIdleSeconds = 120
 $script:BoredRepeatSeconds = 180
 $script:BoredAckStaleMinutes = 45
 $script:KindName = 'grok'
+$script:NoBored = $false
+$script:WatchChannelOverride = $null
+$script:WatchNickOverride = $null
 
 Check 'AM100a Send-WatchIrcBored writes PRIVMSG #machine :!bored only' {
     $seatDir = Join-Path ([IO.Path]::GetTempPath()) ('am100-' + [guid]::NewGuid().ToString('N'))

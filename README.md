@@ -42,6 +42,8 @@ Do not use talk-seat / bobiverse Watch homes (see playbook).
 
 **`!bored` (FR #100):** the monitor posts `PRIVMSG #{machine} :!bored` on seat start, right after the seat's `DONE`, and every few minutes while idle — never while busy (open ACK or pending `agent -p`). No LLM turn. Jeeves assigns the next job; the seat ACKs.
 
+**Loop seat (FR #103):** continuous non-job agents (e.g. ce-dayworks) use `-SeatType loop -Channel '#ce-priority-dev1' -Nick dayworks-dev1` (or `-NoBored`). That suppresses every `!bored` and the fleet ACK/DONE brief. Nick must **not** be `{machine}-{pid}` so Jeeves never assigns.
+
 ## Log (not in git)
 
 Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`
