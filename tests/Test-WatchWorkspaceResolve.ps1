@@ -85,6 +85,89 @@ Check 'AM102e tray Start-BobTrayAgentWatch passes -Cwd' {
     if ($src -notmatch 'Watch-BobTrayAgentWatchEarlyExit') { throw 'tray must watch early exit' }
 }
 
+Check 'AM102f mocked optical DriveType=5 rejected by writable probe' {
+    function Get-CimInstance {
+        param($ClassName, $Filter)
+        [pscustomobject]@{ DeviceID = 'E:'; DriveType = 5 }
+    }
+    if (Test-WatchFixedWritableDriveRoot -Root 'E:\') {
+        throw 'optical DriveType=5 must not count as writable fixed'
+    }
+}
+
+Check 'AM102g mocked network DriveType=4 rejected by writable probe' {
+    function Get-CimInstance {
+        param($ClassName, $Filter)
+        [pscustomobject]@{ DeviceID = 'X:'; DriveType = 4 }
+    }
+    if (Test-WatchFixedWritableDriveRoot -Root 'X:\') {
+        throw 'network DriveType=4 must not count as writable fixed'
+    }
+}
+
+Check 'AM102h missing drive letter returns false (no throw)' {
+    # Fake CIM says Q: is fixed; letter is absent on this box — probe must return false, not throw.
+    function Get-CimInstance {
+        param($ClassName, $Filter)
+        if ($Filter -match "DeviceID='Q:'") {
+            return [pscustomobject]@{ DeviceID = 'Q:'; DriveType = 3 }
+        }
+        return $null
+    }
+    $got = Test-WatchFixedWritableDriveRoot -Root 'Q:\'
+    if ($got) { throw 'missing Q:\ must not pass writable probe' }
+}
+
+Check 'AM102h2 removable DriveType=2 rejected' {
+    function Get-CimInstance {
+        param($ClassName, $Filter)
+        [pscustomobject]@{ DeviceID = 'F:'; DriveType = 2 }
+    }
+    if (Test-WatchFixedWritableDriveRoot -Root 'F:\') {
+        throw 'removable DriveType=2 must not count as writable fixed'
+    }
+}
+
+Check 'AM102i Get-WatchFixedDriveLetters returns sorted fixed only (live)' {
+    $letters = @(Get-WatchFixedDriveLetters)
+    if ($letters.Count -lt 1) { throw 'expected at least one fixed disk' }
+    $sorted = @($letters | Sort-Object)
+    for ($i = 0; $i -lt $letters.Count; $i++) {
+        if ($letters[$i] -ne $sorted[$i]) { throw "letters not sorted: $($letters -join ',')" }
+    }
+    if ($letters[0] -ne 'C' -and (Test-Path -LiteralPath 'C:\')) {
+        # C: may be absent on exotic boxes; on MarchHare it must lead when present and fixed.
+        $cFixed = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+        if ($cFixed -and [int]$cFixed.DriveType -eq 3 -and $letters -notcontains 'C') {
+            throw 'C: fixed present but missing from letter list'
+        }
+    }
+}
+
+Check 'AM102j resolve create path prefers first writable fixed when no \\ai (mocked)' {
+    function Get-WatchFixedDriveLetters { @('C', 'E', 'X') }
+    function Test-WatchFixedWritableDriveRoot {
+        param([string]$Root)
+        return $Root -eq 'C:\'
+    }
+    $created = $null
+    function Test-Path {
+        param([string]$LiteralPath, [switch]$Path)
+        # No existing \ai anywhere in this mock world.
+        if ($LiteralPath -match '(?i)[\\/]ai$') { return $false }
+        return $true
+    }
+    function New-Item {
+        param($ItemType, $Path, [switch]$Force)
+        $script:created = $Path
+        return [pscustomobject]@{ FullName = $Path }
+    }
+    function Write-WatchBootstrapLog { param([string]$Message) }
+    $got = Resolve-AgentWorkspace -Requested '' -Explicit:$false
+    if ($got -notmatch '(?i)^C:\\ai') { throw "expected create C:\ai; got $got" }
+    if ($script:created -notmatch '(?i)^C:\\ai') { throw "New-Item path was $script:created" }
+}
+
 if ($fail -gt 0) { Write-Host "Test-WatchWorkspaceResolve: $fail failed"; exit 1 }
 Write-Host 'Test-WatchWorkspaceResolve: all passed'
 exit 0

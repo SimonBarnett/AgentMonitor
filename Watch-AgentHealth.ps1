@@ -176,20 +176,24 @@ function Test-WatchFixedWritableDriveRoot {
     # Physical fixed local disk (DriveType=3) that accepts create+delete of a probe file.
     param([string]$Root)
     if (-not $Root) { return $false }
-    $rootPath = [IO.Path]::GetFullPath($Root)
-    if ($rootPath -notmatch '^[A-Za-z]:\\$') { return $false }
-    $letter = $rootPath.Substring(0, 1).ToUpperInvariant()
-    $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}:'" -f $letter) -ErrorAction SilentlyContinue
-    if (-not $disk) { return $false }
-    if ([int]$disk.DriveType -ne 3) { return $false } # 3 = local fixed disk
-    $probe = Join-Path $rootPath ('_wah_write_probe_' + [guid]::NewGuid().ToString('N'))
     try {
+        $rootPath = [IO.Path]::GetFullPath($Root)
+        if ($rootPath -notmatch '^[A-Za-z]:\\$') { return $false }
+        $letter = $rootPath.Substring(0, 1).ToUpperInvariant()
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}:'" -f $letter) -ErrorAction SilentlyContinue
+        if (-not $disk) { return $false }
+        if ([int]$disk.DriveType -ne 3) { return $false } # 3 = local fixed disk
+        $probe = Join-Path $rootPath ('_wah_write_probe_' + [guid]::NewGuid().ToString('N'))
         [IO.File]::WriteAllText($probe, 'ok')
         Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
         return $true
     }
     catch {
-        try { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue } catch { }
+        # Missing/ejected letter, ACL deny, or non-fixed — never throw into Resolve-AgentWorkspace.
+        try {
+            if ($probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
+        }
+        catch { }
         return $false
     }
 }
