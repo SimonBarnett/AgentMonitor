@@ -77,3 +77,5 @@ Session state: `%USERPROFILE%\.grok\agent-health\watch-{grok|cursor}-{slot}\stat
 | [docs/build-and-test-plan-document-agentmonitor-2026-09-23.md](docs/build-and-test-plan-document-agentmonitor-2026-09-23.md) | Build plan for this doc work |
 
 **Session rotate / hang (FR #99):** before resume, archive oversized Grok sessions (default 10 MB `updates.jsonl`, never delete). Hung `-p` with no CPU progress for `-SessionHangMinutes` (default 3) is stopped once, session rotated, and the pending FROM redelivered once. Complements FR #91 wake queue/timeout.
+
+**Workspace (FR #102):** resolve `\ai` on fixed local disks only, letter order **C, D, E, …**. Explicit `-Cwd` wins. Bootstrap log: `%TEMP%\Watch-AgentHealth-start.log`. Tray passes `-Cwd` and surfaces early exit.
