@@ -162,6 +162,32 @@ Check 'AM126e docs park issue 126' {
     if ($frText -notmatch 'quit\.req') { throw 'FR must mention quit.req' }
 }
 
+Check 'AM126f source: Cursor TUI-gone uses Complete-WatchSeatRootExit + break' {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw -Encoding UTF8
+    if ($src -notmatch 'root exit teardown \(FR#126\)') {
+        throw 'Cursor TUI-gone must log FR#126 root exit teardown'
+    }
+    if ($src -notmatch '(?s)root exit teardown \(FR#126\).{0,250}Complete-WatchSeatRootExit.{0,200}\bbreak\b') {
+        throw 'Cursor TUI-gone must Complete-WatchSeatRootExit then break'
+    }
+    if ($src -notmatch 'irc disconnect refused foreign home') {
+        throw 'Disconnect must refuse foreign homes (slot isolation A5)'
+    }
+}
+
+Check 'AM126g source: forward and IRC reconnect gated on seatRootGone' {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw -Encoding UTF8
+    if ($src -notmatch 'forward skipped \(seat root gone\)') {
+        throw 'Send-IrcLineToSession must skip wakes when seatRootGone'
+    }
+    if ($src -notmatch 'Test-WatchSeatRootGone -State \$state\) -or \(\$Cursor') {
+        throw 'Ensure-WatchIrcSeat skipIrc must include Test-WatchSeatRootGone'
+    }
+    if ($src -notmatch 'orphan watcher after root/console loss must never post !bored') {
+        throw 'Sync-WatchBored must document/gate seatRootGone'
+    }
+}
+
 Write-Host ("Summary PASS={0} FAIL={1}" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
 exit 0
