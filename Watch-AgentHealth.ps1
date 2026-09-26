@@ -280,6 +280,169 @@ function Write-WatchLog {
     Write-Host $line
 }
 
+function Get-WatchExceptionFingerprint {
+    # FR #131: stable dedupe key (script + site + message); no secrets.
+    param(
+        [string]$Site,
+        [string]$Message
+    )
+    $msg = ([string]$Message).Replace("`r", ' ').Replace("`n", ' ').Trim()
+    if ($msg.Length -gt 240) { $msg = $msg.Substring(0, 240) }
+    $raw = '{0}|{1}|{2}' -f $PSCommandPath, $Site, $msg
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($raw)
+        $hash = $sha.ComputeHash($bytes)
+        return ([BitConverter]::ToString($hash) -replace '-', '').Substring(0, 24).ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Report-WatchException {
+    # FR #131: CAST IRON — unexpected exceptions open SimonBarnett/AgentMonitor issues via gh/HTTP only (no LLM).
+    # Best-effort: never throw; never swallow the caller's control flow responsibility.
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        [string]$Site = 'Watch-AgentHealth',
+        [hashtable]$Context = $null,
+        [int]$DedupeHours = 12,
+        [string]$GhExe = '',
+        [string]$Repo = 'SimonBarnett/AgentMonitor'
+    )
+    try {
+        if (-not $ErrorRecord) { return $null }
+        $ex = $ErrorRecord.Exception
+        $msg = if ($ex) { [string]$ex.Message } else { [string]$ErrorRecord }
+        $typeName = if ($ex) { $ex.GetType().Name } else { 'Error' }
+        $fp = Get-WatchExceptionFingerprint -Site $Site -Message $msg
+        $stateDir = $script:StateDir
+        if (-not $stateDir) { $stateDir = Join-Path $env:TEMP 'Watch-AgentHealth-exception' }
+        New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+        $dedupePath = Join-Path $stateDir 'exception-dedupe.json'
+        $dedupe = @{}
+        if (Test-Path -LiteralPath $dedupePath) {
+            try {
+                $j = Get-Content -LiteralPath $dedupePath -Raw -ErrorAction Stop | ConvertFrom-Json
+                foreach ($p in @($j.PSObject.Properties)) { $dedupe[[string]$p.Name] = [string]$p.Value }
+            }
+            catch { }
+        }
+        $now = [DateTimeOffset]::UtcNow
+        if ($dedupe.ContainsKey($fp)) {
+            try {
+                $prev = [DateTimeOffset]::Parse([string]$dedupe[$fp], $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                if (($now - $prev).TotalHours -lt [Math]::Max(1, $DedupeHours)) {
+                    Write-WatchLog ("exception report skipped dedupe fp={0} site={1}" -f $fp, $Site)
+                    return [pscustomobject]@{ ok = $true; deduped = $true; fingerprint = $fp }
+                }
+            }
+            catch { }
+        }
+        $mid = ''
+        try {
+            if (Get-Command Get-WatchMachineId -ErrorAction SilentlyContinue) {
+                $mid = [string](Get-WatchMachineId)
+            }
+        }
+        catch { }
+        if (-not $mid) { $mid = [string]$env:BOB_MACHINE_ID }
+        if (-not $mid) { $mid = [string]$env:COMPUTERNAME }
+        $sid = ''
+        $ircHome = ''
+        if ($Context) {
+            if ($Context.ContainsKey('sessionId')) { $sid = [string]$Context['sessionId'] }
+            if ($Context.ContainsKey('ircHome')) { $ircHome = [string]$Context['ircHome'] }
+        }
+        if (-not $sid -and $script:StatePath -and (Test-Path -LiteralPath $script:StatePath)) {
+            try {
+                $st = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+                $sid = [string]$st.sessionId
+                if (-not $ircHome) { $ircHome = [string]$st.ircHome }
+            }
+            catch { }
+        }
+        $stack = ''
+        try { $stack = [string]$ErrorRecord.ScriptStackTrace } catch { }
+        if ($stack.Length -gt 2500) { $stack = $stack.Substring(0, 2500) }
+        $logTail = ''
+        if ($script:LogFile -and (Test-Path -LiteralPath $script:LogFile)) {
+            try {
+                $logTail = ((Get-Content -LiteralPath $script:LogFile -Tail 40 -ErrorAction Stop) -join "`n")
+                if ($logTail.Length -gt 3500) { $logTail = $logTail.Substring($logTail.Length - 3500) }
+            }
+            catch { }
+        }
+        $titleMsg = $msg
+        if ($titleMsg.Length -gt 80) { $titleMsg = $titleMsg.Substring(0, 80) }
+        $title = 'watch-exception: {0} @ {1}' -f $typeName, $Site
+        if ($titleMsg) { $title = '{0} — {1}' -f $title, $titleMsg }
+        if ($title.Length -gt 200) { $title = $title.Substring(0, 200) }
+        $body = @(
+            '**CAST IRON FR #131:** deterministic exception (no LLM).'
+            ''
+            "- **fingerprint:** ``$fp``"
+            "- **site:** ``$Site``"
+            "- **type:** ``$typeName``"
+            "- **machine:** ``$mid``"
+            "- **sessionId:** ``$sid``"
+            "- **ircHome:** ``$ircHome``"
+            "- **utc:** $($now.ToString('o'))"
+            ''
+            '### Message'
+            '```'
+            $msg
+            '```'
+            ''
+            '### ScriptStackTrace'
+            '```'
+            $stack
+            '```'
+            ''
+            '### Recent watch log'
+            '```'
+            $logTail
+            '```'
+        ) -join "`n"
+        $gh = $GhExe
+        if (-not $gh) {
+            $cmd = Get-Command gh -ErrorAction SilentlyContinue
+            if ($cmd) { $gh = $cmd.Source }
+        }
+        if (-not $gh -or -not (Test-Path -LiteralPath $gh)) {
+            Write-WatchLog ("exception report FAILED (gh missing) site={0} msg={1}" -f $Site, $msg)
+            return [pscustomobject]@{ ok = $false; deduped = $false; fingerprint = $fp; error = 'gh_missing' }
+        }
+        $tmpBody = Join-Path $stateDir ('exception-issue-{0}.md' -f $fp)
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        [IO.File]::WriteAllText($tmpBody, $body, $utf8)
+        $argList = @('issue', 'create', '--repo', $Repo, '--title', $title, '--body-file', $tmpBody)
+        $p = Start-Process -FilePath $gh -ArgumentList $argList -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $stateDir 'exception-gh-stdout.txt') -RedirectStandardError (Join-Path $stateDir 'exception-gh-stderr.txt')
+        $code = 1
+        try { $code = [int]$p.ExitCode } catch { $code = 1 }
+        if ($code -ne 0) {
+            $err = ''
+            try { $err = Get-Content -LiteralPath (Join-Path $stateDir 'exception-gh-stderr.txt') -Raw -ErrorAction SilentlyContinue } catch { }
+            Write-WatchLog ("exception report FAILED gh exit={0} site={1} err={2}" -f $code, $Site, ([string]$err).Trim())
+            return [pscustomobject]@{ ok = $false; deduped = $false; fingerprint = $fp; error = "gh_exit_$code" }
+        }
+        $dedupe[$fp] = $now.ToString('o')
+        try {
+            $obj = [pscustomobject]@{}
+            foreach ($k in @($dedupe.Keys)) {
+                $obj | Add-Member -NotePropertyName $k -NotePropertyValue $dedupe[$k] -Force
+            }
+            [IO.File]::WriteAllText($dedupePath, ($obj | ConvertTo-Json -Compress), $utf8)
+        }
+        catch { }
+        Write-WatchLog ("exception reported to GitHub site={0} fp={1}" -f $Site, $fp)
+        return [pscustomobject]@{ ok = $true; deduped = $false; fingerprint = $fp }
+    }
+    catch {
+        try { Write-WatchLog ("exception report helper failed: $($_.Exception.Message)") } catch { }
+        return $null
+    }
+}
+
 function Get-WatchSeatTranscriptPath {
     # FR #90 Option B: operator-visible wake transcript (TUI does not reload hidden -p turns).
     if (-not $script:StateDir) { return $null }
@@ -2744,6 +2907,8 @@ function Send-IrcLineToSession {
     }
     catch {
         Write-WatchLog ("forward failed: $($_.Exception.Message)")
+        $ctx = @{ sessionId = $(if ($State) { [string]$State.sessionId } else { '' }); ircHome = $(if ($State) { [string]$State.ircHome } else { '' }) }
+        [void](Report-WatchException -ErrorRecord $_ -Site 'Send-IrcLineToSession' -Context $ctx)
         return $State
     }
 }
@@ -3361,12 +3526,15 @@ try {
         }
         catch {
             Write-WatchLog ("watch loop error: $($_.Exception.Message)")
+            $ctx = @{ sessionId = $(if ($state) { [string]$state.sessionId } else { '' }); ircHome = $(if ($state) { [string]$state.ircHome } else { '' }) }
+            [void](Report-WatchException -ErrorRecord $_ -Site 'WatchLoop' -Context $ctx)
             Start-Sleep -Seconds $CrashBackoffSeconds
         }
     }
 }
 catch {
     Write-WatchLog ("watch fatal: $($_.Exception.Message)")
+    [void](Report-WatchException -ErrorRecord $_ -Site 'WatchFatal')
 }
 finally {
     # Hotpatch / Reload / crash: if the interactive TUI is still alive, leave IRC up
