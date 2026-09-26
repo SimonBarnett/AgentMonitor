@@ -2280,14 +2280,18 @@ function Ensure-WatchSessionBeforeResume {
     $State | Add-Member -NotePropertyName 'lastSessionRotate' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
     $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'oversized-archive-failed' -Force
     Write-WatchLog ("session rotate oversized archive-failed keep-session={0} updatesMb={1:N1} reason={2}" -f $old, ($info.UpdatesBytes / 1MB), $arch.reason)
-    Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized-archive-failed' -Fields @{
-        old_session = $old
-        new_session = $old
-        updates_mb  = [Math]::Round(($info.UpdatesBytes / 1MB), 2)
-        archive     = ''
-        archive_ok  = $false
-        archive_reason = [string]$arch.reason
+    # Best-effort digest note only — never block IRC forward / wake start (marchhare hangs).
+    try {
+        Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized-archive-failed' -Fields @{
+            old_session = $old
+            new_session = $old
+            updates_mb  = [Math]::Round(($info.UpdatesBytes / 1MB), 2)
+            archive     = ''
+            archive_ok  = $false
+            archive_reason = [string]$arch.reason
+        }
     }
+    catch { }
     return $State
 }
 
@@ -2923,34 +2927,42 @@ function Start-DetachedWatchWorkerIfNeeded {
 }
 
 function Register-WatchWorkerProcess {
-    New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
-    $self = $PID
-    $kindFlag = if ($Cursor) { '-Cursor' } else { '-Grok' }
-    $seatHome = Get-WatchBoundIrcHome
-    if (-not $seatHome) { $seatHome = [string]$IrcHome }
-    # Only retire stale workers on THIS slot home â€” never kill seats 2/3/4.
-    foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
-        $opid = [int]$row.ProcessId
-        Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $seatHome)
-        Stop-Process -Id $opid -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Milliseconds 400
-    if (Test-Path -LiteralPath $script:WorkerPidPath) {
-        try {
-            $old = [int](Get-Content -LiteralPath $script:WorkerPidPath -Raw -ErrorAction Stop)
+    # Never let registration abort the monitor (stale-kill / pid file races).
+    try {
+        New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
+        $self = $PID
+        $seatHome = Get-WatchBoundIrcHome
+        if (-not $seatHome) { $seatHome = [string]$IrcHome }
+        # Only retire stale workers on THIS slot home — never kill seats 2/3/4.
+        foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
+            $opid = [int]$row.ProcessId
+            if ($opid -le 0 -or $opid -eq $self) { continue }
+            Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $seatHome)
+            try { Stop-Process -Id $opid -Force -ErrorAction SilentlyContinue } catch { }
         }
-        catch { $old = 0 }
-        if ($old -gt 0 -and $old -ne $self) {
-            $oldProc = Get-Process -Id $old -ErrorAction SilentlyContinue
-            if ($oldProc) {
-                Write-WatchLog "replacing previous watch worker pid=$old (this slot)"
-                Stop-Process -Id $old -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds 400
+        if ($script:WorkerPidPath -and (Test-Path -LiteralPath $script:WorkerPidPath)) {
+            try {
+                $old = [int](Get-Content -LiteralPath $script:WorkerPidPath -Raw -ErrorAction Stop)
+            }
+            catch { $old = 0 }
+            if ($old -gt 0 -and $old -ne $self) {
+                $oldProc = Get-Process -Id $old -ErrorAction SilentlyContinue
+                if ($oldProc) {
+                    Write-WatchLog "replacing previous watch worker pid=$old (this slot)"
+                    try { Stop-Process -Id $old -Force -ErrorAction SilentlyContinue } catch { }
+                    Start-Sleep -Milliseconds 400
+                }
             }
         }
+        if ($script:WorkerPidPath) {
+            Set-Content -LiteralPath $script:WorkerPidPath -Value ([string]$self) -Encoding ascii -NoNewline
+        }
+        Write-WatchLog ("watch worker online pid={0} kind={1} slot={2} home={3}" -f $self, $script:KindName, $script:ClientSlot, $seatHome)
     }
-    Set-Content -LiteralPath $script:WorkerPidPath -Value ([string]$self) -Encoding ascii -NoNewline
-    Write-WatchLog ("watch worker online pid={0} kind={1} slot={2} home={3}" -f $self, $script:KindName, $script:ClientSlot, $seatHome)
+    catch {
+        Write-WatchLog ("register watch worker failed: $($_.Exception.Message)")
+    }
 }
 
 function Unregister-WatchWorkerProcess {
