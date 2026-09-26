@@ -1,0 +1,29 @@
+# FR: Watch-AgentWatcher (meta-monitor for Watch-AgentHealth)
+
+**Date:** 2026-09-26
+
+## Why
+Watch-AgentHealth (the agent watcher) repeatedly died or left IRC with
+`PART … seat ended` while the TUI stayed up. Operators saw "lost IRC" without
+a clear line in the log tying cause → effect.
+
+## Findings (hotfixed + logged)
+
+| Finding | Fix |
+|---------|-----|
+| `talk_seat_pid` prefers `agent=` over `seat=`; writing `agent=<irc_agent pid>` made restarts PART | `Write-WatchCoordinatorPid`: `agent=$SeatPid` (TUI), python in `irc_agent=` |
+| `$Home` param is read-only in PS 5.1 | Rename to `-SeatHome` |
+| Unicode emdash broke parse | ASCII-only log strings |
+| Grok `Responding=$false` false unhealthy | Root-PID-only `Test-TreeHealthy` |
+| Monitor exit tore down IRC while TUI alive | `finally` leaves IRC up |
+
+## Tool
+`tools/Watch-AgentWatcher.ps1`
+
+- Checks: WatchWorker process, irc_agent/listen, seat alive, `agent==seat`, log errors, irc.log PART
+- Writes `Watch-AgentWatcher.log` next to the watch log
+- Optional `-Heal` relaunches `Watch-AgentHealth -Reload`
+- `-Once` for tests / one-shot; default loop every 30s
+
+## Logging in Watch-AgentHealth
+`irc-health tag=…` snapshots on ensure / missing / tick / disconnect.
