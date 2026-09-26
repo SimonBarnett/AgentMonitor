@@ -510,6 +510,10 @@ function Sync-WatchWakeLifecycle {
         [switch]$StartNext
     )
     if (-not $State) { return $State }
+    # FR #126: after root/console teardown, never start or dequeue wakes.
+    if (($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone) {
+        return $State
+    }
     if (Get-Command Update-WatchPendingForwardHang -ErrorAction SilentlyContinue) {
         $State = Update-WatchPendingForwardHang -State $State
         if ($State.PSObject.Properties.Name -contains 'seatUnhealthy' -and [bool]$State.seatUnhealthy) {
@@ -597,6 +601,12 @@ function Reset-WatchSessionForNew {
     }
     if ($State.PSObject.Properties.Name -contains 'cursorPrintOnly') {
         $State.PSObject.Properties.Remove('cursorPrintOnly')
+    }
+    if ($State.PSObject.Properties.Name -contains 'seatRootGone') {
+        $State.PSObject.Properties.Remove('seatRootGone')
+    }
+    if ($State.PSObject.Properties.Name -contains 'seatUnhealthy') {
+        $State.PSObject.Properties.Remove('seatUnhealthy')
     }
     if ($State.PSObject.Properties.Name -contains 'cursorSessionValid') {
         $State.PSObject.Properties.Remove('cursorSessionValid')
@@ -1534,6 +1544,50 @@ function Disconnect-WatchIrc {
     }
 }
 
+function Test-WatchSeatRootGone {
+    # FR #126: true after root/console teardown — no IRC reconnect, !bored, or wakes.
+    param($State)
+    if (-not $State) { return $false }
+    return ($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone
+}
+
+function Complete-WatchSeatRootExit {
+    # FR #126: seat console/root gone → QUIT this home, stop IRC children + root tree,
+    # clear wake queue, mark seatRootGone. Caller exits the monitor loop (no relaunch).
+    # Bound-home checks inside Disconnect-WatchIrc leave other slots untouched.
+    param(
+        $State,
+        [int]$RootPid = 0,
+        [string]$Reason = 'root/console closed'
+    )
+    if (-not $State) { return $State }
+    if (Test-WatchSeatRootGone -State $State) { return $State }
+    $why = ([string]$Reason).Replace("`r", ' ').Replace("`n", ' ').Trim()
+    if (-not $why) { $why = 'root/console closed' }
+    Write-WatchLog ("seat root exit teardown reason={0} rootPid={1}" -f $why, $RootPid)
+    Disconnect-WatchIrc -State $State -Reason $why
+    $wp = 0
+    if ($State.PSObject.Properties.Name -contains 'wakePid') {
+        try { $wp = [int]$State.wakePid } catch { $wp = 0 }
+    }
+    if ($wp -gt 0) {
+        Stop-Process -Id $wp -Force -ErrorAction SilentlyContinue
+    }
+    if ($RootPid -gt 0) {
+        Stop-WatchedTree -RootPid $RootPid
+    }
+    $State.rootPid = 0
+    $State = Clear-WatchWakeState -State $State -Reason ('root exit clear wake ({0})' -f $why)
+    $State | Add-Member -NotePropertyName 'wakeQueue' -NotePropertyValue @() -Force
+    $State | Add-Member -NotePropertyName 'pendingForwardPid' -NotePropertyValue 0 -Force
+    $State | Add-Member -NotePropertyName 'seatRootGone' -NotePropertyValue $true -Force
+    $State | Add-Member -NotePropertyName 'seatUnhealthy' -NotePropertyValue $true -Force
+    if ($State.PSObject.Properties.Name -contains 'cursorPrintOnly') {
+        $State.PSObject.Properties.Remove('cursorPrintOnly')
+    }
+    return $State
+}
+
 function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
     if (Test-WatchNoBored) {
@@ -1900,6 +1954,10 @@ function Sync-WatchBored {
     )
     if (-not $State) { return $State }
     if (Test-WatchNoBored) {
+        return $State
+    }
+    # FR #126: orphan watcher after root/console loss must never post !bored.
+    if (($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone) {
         return $State
     }
     $seatHome = [string]$State.ircHome
@@ -2377,6 +2435,11 @@ function Send-IrcLineToSession {
         Write-WatchLog ('listen {0}' -f $trim.Substring(0, [Math]::Min(120, $trim.Length)))
     }
     if (Test-DropIrcLine -Line $Line) { return $State }
+    # FR #126: root/console gone — no new wakes.
+    if (($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone) {
+        Write-WatchLog 'forward skipped (seat root gone)'
+        return $State
+    }
     # FR #99: hang check (no-CPU) before queueing another wake.
     $State = Update-WatchPendingForwardHang -State $State
     if ($State.PSObject.Properties.Name -contains 'seatUnhealthy' -and [bool]$State.seatUnhealthy) {
@@ -2930,14 +2993,20 @@ try {
     while ($true) {
         try {
         # Keep IRC up while the seat is live (agent+listen on own #{machine} only).
-        # Cursor print-only after TUI exit: do not reconnect (Disconnect already ran).
-        $skipIrc = $Cursor -and (Test-CursorPrintOnlyMode -State $state)
+        # FR #126 / Cursor print-only: after root/console exit do not reconnect.
+        $skipIrc = (Test-WatchSeatRootGone -State $state) -or ($Cursor -and (Test-CursorPrintOnlyMode -State $state))
         if (-not $skipIrc) {
             $ag = @(Get-WatchIrcAgentRows -ResolvedHome ([string]$state.ircHome))
             $li = @(Get-WatchIrcListenRows -ResolvedHome ([string]$state.ircHome))
             if ($ag.Count -eq 0 -or $li.Count -eq 0) {
                 $state = Ensure-WatchIrcSeat -State $state
             }
+        }
+        # FR #126: root/console gone — monitor exits (finally writes watch-stop QUIT if needed).
+        if (Test-WatchSeatRootGone -State $state) {
+            Write-WatchLog "seat root gone - monitor exit (no !bored, no wakes, no IRC reconnect)"
+            Write-WatchState -Obj $state
+            break
         }
         $needStart = $false
         if (-not $current) {
@@ -2960,13 +3029,11 @@ try {
             else {
                 $livePid = Resolve-CursorWatchRootPid -SessionId ([string]$state.sessionId) -LauncherPid $current.RootPid
                 if ($livePid -le 0) {
-                    Write-WatchLog "cursor Composer not running session=$($state.sessionId) - print-only (no TUI relaunch)"
-                    Disconnect-WatchIrc -State $state -Reason 'tui closed'
-                    if ($current.RootPid -gt 0) {
-                        Stop-WatchedTree -RootPid $current.RootPid
-                    }
-                    $state = Set-CursorPrintOnlyMode -State $state -Enable
+                    Write-WatchLog "cursor Composer not running session=$($state.sessionId) - root exit teardown (FR#126)"
+                    $state = Complete-WatchSeatRootExit -State $state -RootPid $current.RootPid -Reason 'tui closed'
                     $current.RootPid = 0
+                    Write-WatchState -Obj $state
+                    break
                 }
                 else {
                     if ($livePid -ne $current.RootPid) {
@@ -2978,11 +3045,12 @@ try {
             }
         }
         elseif (-not (Test-TreeHealthy -RootPid $current.RootPid)) {
-            Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - restart (resume session $($state.sessionId))"
-            Disconnect-WatchIrc -State $state -Reason 'tui closed'
-            Stop-WatchedTree -RootPid $current.RootPid
-            $needStart = $true
-            Start-Sleep -Seconds $CrashBackoffSeconds
+            # FR #126: do not relaunch — orphan watcher must leave IRC (QUIT) and exit.
+            Write-WatchLog "unhealthy agent tree rootPid=$($current.RootPid) - root exit teardown (no restart) session=$($state.sessionId)"
+            $state = Complete-WatchSeatRootExit -State $state -RootPid $current.RootPid -Reason 'tui closed'
+            $current.RootPid = 0
+            Write-WatchState -Obj $state
+            break
         }
 
         if ($needStart) {
