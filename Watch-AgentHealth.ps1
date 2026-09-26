@@ -10,7 +10,7 @@
   The agent only handles messages the monitor passes; it does not run or duplicate this monitor.
   Own IRC home only (.agentic-irc-watch-*). Does not touch cursor / cursor-2 / bobiverse Watch.
   Does not stamp UAT. Does not send !bobiverse.
-  The TUI agent does not probe IRC â€” it acts on monitor FROM only (skill watch-seat).
+  The TUI agent does not probe IRC Ã¢â‚¬â€ it acts on monitor FROM only (skill watch-seat).
 
 .EXAMPLE
   Desktop\Watch-AgentHealth.cmd cursor
@@ -199,7 +199,7 @@ function Test-WatchFixedWritableDriveRoot {
 }
 
 function Get-WatchFixedDriveLetters {
-    # Simon 2026-09-25: letter order C, D, E, … - fixed local disks only.
+    # Simon 2026-09-25: letter order C, D, E, â€¦ - fixed local disks only.
     $letters = @()
     foreach ($disk in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
         $id = [string]$disk.DeviceID
@@ -266,7 +266,7 @@ $script:StateDir = Join-Path $env:USERPROFILE '.grok\agent-health'
 $script:IrcHomeExplicit = [bool]($PSBoundParameters.ContainsKey('IrcHome') -and $IrcHome)
 $script:ClientSlot = 1
 $script:BoundIrcHome = $null
-# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 â€¦).
+# Paths rebound in Bind-WatchSlot (next free .agentic-irc-watch-* / -2 / -3 Ã¢â‚¬Â¦).
 $script:StatePath = Join-Path $script:StateDir ("state-{0}.json" -f $script:KindName)
 $script:WorkerPidPath = Join-Path $script:StateDir ("watch-worker-{0}.pid" -f $script:KindName)
 if (-not $IrcHome) {
@@ -1432,7 +1432,7 @@ function Ensure-WatchIrcSeat {
                 $coordPath = Join-Path $resolved 'coordinator.pid'
                 Write-WatchCoordinatorPid -CoordPath $coordPath -Nick $nick -SeatPid $liveSeat `
                     -ListenPid ([string]$listens[0].ProcessId) -IrcAgentPid ([string]$agents[0].ProcessId) `
-                    -Home $resolved -Channels (Get-WatchSeatChannels -MachineId (Get-WatchMachineId))
+                    -SeatHome $resolved -Channels (Get-WatchSeatChannels -MachineId (Get-WatchMachineId))
                 Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'already-up' -SeatPid $liveSeat -Nick $nick
                 $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue $false -Force
                 return $State
@@ -1493,7 +1493,7 @@ function Ensure-WatchIrcSeat {
     # Write coordinator BEFORE starting irc_agent. agent= MUST be live seat host (#137),
     # not the irc_agent PID (talk_seat_pid prefers agent= and PARTs on stale dead agent=).
     Write-WatchCoordinatorPid -CoordPath $coordPath -Nick $nick -SeatPid $seatPid `
-        -ListenPid '' -IrcAgentPid '' -Home $resolved -Channels $channels
+        -ListenPid '' -IrcAgentPid '' -SeatHome $resolved -Channels $channels
     Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'pre-start' -SeatPid $seatPid -Nick $nick
     if ($agents.Count -eq 0) {
         Write-WatchLog ("irc ensure start agent nick={0} seat={1} channels={2} home={3}" -f $nick, $seatPid, $channels, $resolved)
@@ -1524,7 +1524,7 @@ function Ensure-WatchIrcSeat {
     $listenPid = if ($listens.Count -gt 0) { $listens[0].ProcessId } else { '' }
     Write-WatchCoordinatorPid -CoordPath $coordPath -Nick $nick -SeatPid $seatPid `
         -ListenPid ([string]$listenPid) -IrcAgentPid ([string]$agentPid) `
-        -Home $resolved -Channels $channels
+        -SeatHome $resolved -Channels $channels
     Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'post-ensure' -SeatPid $seatPid -Nick $nick
     if ($agents.Count -eq 0 -or $listens.Count -eq 0) {
         Write-WatchLog ("irc ensure incomplete irc_agent={0} listen={1}" -f $agentPid, $listenPid)
@@ -1562,19 +1562,19 @@ function Write-WatchCoordinatorPid {
         [Parameter(Mandatory)][int]$SeatPid,
         [string]$ListenPid = '',
         [string]$IrcAgentPid = '',
-        [string]$Home = '',
+        [string]$SeatHome = '',
         [string]$Channels = ''
     )
     if ($SeatPid -le 0) { throw 'Write-WatchCoordinatorPid: SeatPid must be live host pid' }
     if (-not $Channels) { $Channels = Get-WatchSeatChannels -MachineId (Get-WatchMachineId) }
-    if (-not $Home) { $Home = Split-Path -Parent $CoordPath }
+    if (-not $SeatHome) { $SeatHome = Split-Path -Parent $CoordPath }
     @(
         "nick=$Nick"
         "seat=$SeatPid"
         "listen=$ListenPid"
         "agent=$SeatPid"
         "irc_agent=$IrcAgentPid"
-        "home=$Home"
+        "home=$SeatHome"
         "channels=$Channels"
     ) | Set-Content -LiteralPath $CoordPath -Encoding utf8
 }
@@ -1861,7 +1861,7 @@ function Test-DropIrcLine {
     if ($Line -notmatch '^FROM ') { return $true }
     # Protocol tokens are UPPERCASE; -cmatch so chat words (digest, point, seal) still forward.
     if ($Line -cmatch ' POINT | DIGEST | AGPK | SEAL ') { return $true }
-    # Do NOT drop chat PING here â€” Send-IrcLineToSession auto-pongs first (CAST IRON).
+    # Do NOT drop chat PING here Ã¢â‚¬â€ Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
     return $false
 }
@@ -1899,7 +1899,7 @@ function Test-WatchIrcPingText {
         [string]$Text,
         [string]$OurNick = ''
     )
-    # CAST IRON: any ping aimed at this seat (bare or addressed) â€” watcher pongs, never wakes agent.
+    # CAST IRON: any ping aimed at this seat (bare or addressed) Ã¢â‚¬â€ watcher pongs, never wakes agent.
     $t = ([string]$Text).Trim()
     if (-not $t) { return $false }
     if ($t -match '^(?i)ping$') { return $true }
@@ -1940,7 +1940,7 @@ function Set-WatchBoredActivity {
 }
 
 function Get-WatchOutboxPayload {
-    # Strip PRIVMSG prefix; return chat payload (ACK / DONE / !bored / …).
+    # Strip PRIVMSG prefix; return chat payload (ACK / DONE / !bored / â€¦).
     param([string]$Line)
     $t = ([string]$Line).Trim()
     if ($t -match '^PRIVMSG\s+\S+\s+:(.*)$') { return $Matches[1].Trim() }
@@ -2591,7 +2591,7 @@ function Send-IrcLineToSession {
     }
     $trim = $Line.Trim()
     if ($trim -match '^FROM ') {
-        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself â€” never forward to agent
+        # CAST IRON (Simon 2026-09-23): watcher ALWAYS auto-pongs PING itself Ã¢â‚¬â€ never forward to agent
         # (busy seats still answer so fleet knows they are responding).
         $parts = Get-IrcFromParts -Line $trim
         if ($parts) {
@@ -3088,7 +3088,7 @@ $script:LogFile = $LogPath
 if (-not $WatchWorker -and $Windows -eq 'on') {
     $WatchWorker = $true
 }
-# Next free .agentic-irc-watch-* / -2 / -3 … before spawning the detached worker.
+# Next free .agentic-irc-watch-* / -2 / -3 â€¦ before spawning the detached worker.
 Bind-WatchSlot
 Start-DetachedWatchWorkerIfNeeded
 $state = Read-WatchState
@@ -3329,7 +3329,7 @@ finally {
                 Write-WatchCoordinatorPid -CoordPath (Join-Path $home 'coordinator.pid') -Nick $nick -SeatPid $rp `
                     -ListenPid $(if ($li.Count) { [string]$li[0].ProcessId } else { '' }) `
                     -IrcAgentPid $(if ($ag.Count) { [string]$ag[0].ProcessId } else { '' }) `
-                    -Home $home
+                    -SeatHome $home
                 Write-WatchIrcHealthSnapshot -ResolvedHome $home -Tag 'watch-stop-leave-irc' -SeatPid $rp -Nick $nick
             }
         }
@@ -3347,3 +3347,4 @@ finally {
         Write-WatchLog "watch stop worker pid=$PID session=$($state.sessionId)"
     }
 }
+
