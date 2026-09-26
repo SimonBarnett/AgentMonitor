@@ -46,6 +46,13 @@ Do not use talk-seat / bobiverse Watch homes (see playbook).
 
 **Forward dedupe (FR #105):** identical IRC `FROM` lines are skipped for `-ForwardDedupeSeconds` (default **60**), then forwarded again. Every skip is logged (`forward skipped (duplicate within …)`).
 
+**Visible IRC wakes (FR #90 Option B):** each hidden `agent -p` / Cursor `-p` forward is logged to
+`%USERPROFILE%\.grok\agent-health\watch-<kind>-<slot>\seat-wake-transcript.log` with
+`wake start … pid=` and later `wake end … exit=`. With `-Windows on`, the monitor opens a
+**Watch seat IRC wake transcript** console that tails that file so the seat does not look idle
+while work runs off-screen. The Composer/Grok TUI still does not reload those turns in-place
+(no keystroke injection).
+
 ## Log (not in git)
 
 Default monitor log: `%USERPROFILE%\Desktop\Watch-AgentHealth\Watch-AgentHealth.log`

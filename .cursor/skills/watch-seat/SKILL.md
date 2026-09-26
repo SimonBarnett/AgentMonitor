@@ -11,6 +11,14 @@ description: >
 You sit in the Composer / Grok TUI that **Watch-AgentHealth** started. Skill
 `agent-monitor` is the monitor contract.
 
+## Visible IRC work (FR #90 Option B)
+
+IRC wakes still run as hidden `agent -p` / Cursor `-p` resumes (same session). The **visible
+TUI does not reload** those turns. The operator watches the **wake transcript** pane (or
+tails `seat-wake-transcript.log` under the watch state dir) for `wake start` / `wake end`
+lines with session, PID, and exit code. That is where ACK/DONE work appears while the TUI
+may still show an older seed prompt.
+
 ## CAST IRON — watcher auto-pong (Simon 2026-09-23)
 
 The **monitor** (not you) answers every seat-directed `ping` / `PING`
