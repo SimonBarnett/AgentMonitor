@@ -204,6 +204,86 @@ Invoke-Case 'AM10 drop filter is case-sensitive for protocol tokens (ASSIGN with
     if (-not (Test-DropIrcLine -Line ':server 001 x')) { throw 'non-FROM still drops' }
 }
 
+Invoke-Case 'AM97 seat N owns bound IRC home (FR#97 two-seat isolation)' {
+    # Static + simulated two-seat bind: separate homes/logs; disconnect refuses foreign home;
+    # ASSIGN wake only for matching nick; Bind sets $script:IrcHome (not local-only).
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'function Get-WatchBoundIrcHome') { throw 'Get-WatchBoundIrcHome required' }
+    if ($src -notmatch '\$script:IrcHome = \$resolved') { throw 'Bind-WatchSlot must set $script:IrcHome' }
+    if ($src -notmatch 'irc disconnect refused foreign home') { throw 'Disconnect must refuse foreign home' }
+    if ($src -notmatch 'irc ensure rebasing state\.ircHome') { throw 'Ensure must rebase stale sibling home' }
+    if ($src -match 'New-Item -ItemType File -Force -Path \$script:LogFile \| Out-Null\s*\r?\nif \(-not \$WatchWorker') {
+        throw 'must not truncate default log before Bind-WatchSlot'
+    }
+    # Simulated two seats (no live IRC / monitors)
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('am97-' + [guid]::NewGuid().ToString('N'))
+    $h1 = Join-Path $root 'watch-grok'
+    $h2 = Join-Path $root 'watch-grok-2'
+    $logRoot = Join-Path $root 'logs'
+    New-Item -ItemType Directory -Force -Path $h1, $h2, $logRoot | Out-Null
+    $log1 = Join-Path $logRoot 'Watch-AgentHealth.log'
+    $log2 = Join-Path $logRoot 'Watch-AgentHealth-2.log'
+    Set-Content -LiteralPath $log1 -Value "seat1-marker`n" -Encoding utf8
+    # Import bind helpers with minimal script state
+    function script:Write-WatchLog { param([string]$Message) }
+    function script:Test-ForbiddenIrcHome { param([string]$ResolvedHome) $false }
+    function script:Get-WatchSlotNumberFromHome {
+        param([string]$SeatHome, [string]$Kind)
+        if ($SeatHome -match '-(\d+)$') { return [int]$Matches[1] }
+        return 1
+    }
+    Import-WatchFunctions -Names @('Get-WatchBoundIrcHome', 'Bind-WatchSlot', 'Disconnect-WatchIrc', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText', 'Get-IrcFromParts')
+    # Seat 1 bind
+    $script:IrcHomeExplicit = $true
+    $script:KindName = 'grok'
+    $script:ClientSlot = 0
+    $script:BoundIrcHome = $null
+    $script:IrcHome = $null
+    $script:StateDir = $null
+    $script:LogFile = $null
+    $LogPath = $log1
+    $IrcHome = $h1
+    Bind-WatchSlot
+    $b1 = Get-WatchBoundIrcHome
+    if ($b1.TrimEnd('\') -ne ([IO.Path]::GetFullPath($h1)).TrimEnd('\')) { throw "seat1 bound home wrong: $b1" }
+    if ($script:ClientSlot -ne 1) { throw "seat1 slot expected 1 got $($script:ClientSlot)" }
+    if (-not (Test-Path -LiteralPath $log1)) { throw 'seat1 log missing' }
+    $log1Body = Get-Content -LiteralPath $log1 -Raw
+    if ($log1Body -notmatch 'seat1-marker') { throw 'seat1 log must not be wiped on bind' }
+    $s1Home = $script:BoundIrcHome
+    $s1Log = $script:LogFile
+    # Seat 2 bind (simulate second process state)
+    $script:IrcHomeExplicit = $true
+    $script:BoundIrcHome = $null
+    $script:IrcHome = $null
+    $LogPath = $log2
+    $IrcHome = $h2
+    Bind-WatchSlot
+    $b2 = Get-WatchBoundIrcHome
+    if ($b2.TrimEnd('\') -ne ([IO.Path]::GetFullPath($h2)).TrimEnd('\')) { throw "seat2 bound home wrong: $b2" }
+    if ($script:ClientSlot -ne 2) { throw "seat2 slot expected 2 got $($script:ClientSlot)" }
+    if ($s1Home.TrimEnd('\') -eq $b2.TrimEnd('\')) { throw 'two seats must not share ircHome' }
+    if ($s1Log -eq $script:LogFile) { throw 'two seats must not share LogFile' }
+    if (-not (Test-Path -LiteralPath $log2)) { throw 'seat2 log should be created if missing' }
+    # Disconnect seat2 must not target seat1 home
+    $stForeign = [pscustomobject]@{ ircHome = $h1 }
+    Disconnect-WatchIrc -State $stForeign -Reason 'test'
+    # (no throw; log refusal). Seat1 marker log still intact:
+    if ((Get-Content -LiteralPath $log1 -Raw) -notmatch 'seat1-marker') { throw 'disconnect foreign must not touch seat1 log' }
+    # ASSIGN addressing isolation
+    $nick1 = 'flamingo-111'
+    $nick2 = 'flamingo-222'
+    $line1 = "FROM bob-flamingo #flamingo ${nick1}: ASSIGN FR x/y#1"
+    $line2 = "FROM bob-flamingo #flamingo ${nick2}: ASSIGN FR x/y#2"
+    if (-not (Test-WatchIrcAddressedToNick -Text "${nick1}: ASSIGN FR x/y#1" -OurNick $nick1)) { throw 'nick1 must match own ASSIGN' }
+    if (Test-WatchIrcAddressedToNick -Text "${nick2}: ASSIGN FR x/y#2" -OurNick $nick1) { throw 'nick1 must not take nick2 ASSIGN' }
+    $w1 = Format-WatchWakeText -Line $line1 -OurNick $nick1
+    $w2 = Format-WatchWakeText -Line $line2 -OurNick $nick1
+    if ($w1 -notmatch 'FOR YOU') { throw 'own nick wake must be FOR YOU' }
+    if ($w2 -match 'FOR YOU') { throw 'other nick ASSIGN must not FOR YOU this seat' }
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
 if ($script:Fail -gt 0) { exit 1 }
 exit 0

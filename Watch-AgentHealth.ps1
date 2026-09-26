@@ -819,8 +819,21 @@ function Resolve-NextFreeWatchIrcHome {
     throw ("All 16 watch-{0} slots are in use (live Watch-AgentHealth workers)." -f $Kind)
 }
 
+function Get-WatchBoundIrcHome {
+    # FR #97: always the seat-bound home (never a sibling slot).
+    if ($script:BoundIrcHome) {
+        return [IO.Path]::GetFullPath([string]$script:BoundIrcHome)
+    }
+    if ($script:IrcHome) {
+        return [IO.Path]::GetFullPath([string]$script:IrcHome)
+    }
+    return $null
+}
+
 function Bind-WatchSlot {
     # Pick next free IRC home (or keep -IrcHome), isolate state/log/worker pid per slot.
+    # FR #97 CAST IRON: set $script:IrcHome (not a function-local $IrcHome) so Ensure-WatchIrcSeat,
+    # Initialize-WatchIrcHome, irc.log tail, outbox, and Disconnect all use THIS seat only.
     if ($script:IrcHomeExplicit) {
         $resolved = [IO.Path]::GetFullPath($IrcHome)
     }
@@ -833,7 +846,9 @@ function Bind-WatchSlot {
     $slot = Get-WatchSlotNumberFromHome -SeatHome $resolved -Kind $script:KindName
     $script:ClientSlot = $slot
     $script:BoundIrcHome = $resolved
-    $IrcHome = $resolved
+    $script:IrcHome = $resolved
+    # Keep param-scope name in sync for any leftover $IrcHome reads in this script.
+    Set-Variable -Name IrcHome -Scope Script -Value $resolved
     $script:StateDir = Join-Path $env:USERPROFILE ('.grok\agent-health\watch-{0}-{1}' -f $script:KindName, $slot)
     New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
     New-Item -ItemType Directory -Force -Path $resolved | Out-Null
@@ -852,7 +867,13 @@ function Bind-WatchSlot {
     else {
         $script:LogFile = $LogPath
     }
-    Write-WatchLog ("bind slot={0} ircHome={1} stateDir={2}" -f $slot, $resolved, $script:StateDir)
+    # Create log only if missing — never truncate another seat's log (FR #97).
+    if (-not (Test-Path -LiteralPath $script:LogFile)) {
+        $parent = Split-Path -Parent $script:LogFile
+        if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        New-Item -ItemType File -Path $script:LogFile -Force | Out-Null
+    }
+    Write-WatchLog ("bind slot={0} ircHome={1} stateDir={2} log={3}" -f $slot, $resolved, $script:StateDir, $script:LogFile)
 }
 
 function Stop-OrphanWatchPythonForHome {
@@ -973,11 +994,15 @@ function Test-ForbiddenIrcHome {
 
 function Initialize-WatchIrcHome {
     param($State)
-    $resolved = [IO.Path]::GetFullPath($IrcHome)
+    # FR #97: always bound home for this seat
+    $home = Get-WatchBoundIrcHome
+    if (-not $home) { $home = [string]$IrcHome }
+    $resolved = [IO.Path]::GetFullPath($home)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         throw "Refusing IrcHome $resolved (talk-seat / Watch home). Use .agentic-irc-watch-*."
     }
     $State.ircHome = $resolved
+    $State | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:ClientSlot -Force
     return $State
 }
 
@@ -1204,12 +1229,26 @@ function Ensure-WatchIrcSeat {
     # CAST IRON (Simon 2026-09-23): systray / Watch-AgentHealth launch MUST connect
     # irc_agent + irc_listen on this home and JOIN its own #{machine} ONLY
     # (CAST IRON 2026-09-25: workers never join #bobiverse / #agentic_irc). Monitor then forwards FROM.
+    # FR #97: never adopt another slot's home/agent/listen.
     param($State)
+    $bound = Get-WatchBoundIrcHome
     $seatHome = [string]$State.ircHome
+    if ($bound) {
+        # Force state onto this seat's bound home (do not keep a sibling home from stale state.json).
+        if (-not $seatHome -or ([IO.Path]::GetFullPath($seatHome).TrimEnd('\') -ne $bound.TrimEnd('\'))) {
+            Write-WatchLog ("irc ensure rebasing state.ircHome from {0} to bound {1}" -f $seatHome, $bound)
+            $seatHome = $bound
+            $State.ircHome = $bound
+        }
+    }
     if (-not $seatHome) { return $State }
     $resolved = [IO.Path]::GetFullPath($seatHome)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         Write-WatchLog 'irc ensure skipped (forbidden home)'
+        return $State
+    }
+    if ($bound -and ($resolved.TrimEnd('\') -ne $bound.TrimEnd('\'))) {
+        Write-WatchLog ("irc ensure refused foreign home {0} (bound={1})" -f $resolved, $bound)
         return $State
     }
     New-Item -ItemType Directory -Force -Path $resolved | Out-Null
@@ -1227,7 +1266,8 @@ function Ensure-WatchIrcSeat {
     if ($agents.Count -gt 0 -and $listens.Count -gt 0) {
         $nick = ''
         if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
-        Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId)
+        # Confirm agent command line is for THIS home only (already filtered, log for audit)
+        Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2} home={3}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
         if ($nick) {
             $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
             if ($nick -match '-(\d+)$') {
@@ -1333,6 +1373,12 @@ function Disconnect-WatchIrc {
     $watchHome = [string]$State.ircHome
     if (-not $watchHome) { return }
     $resolved = [IO.Path]::GetFullPath($watchHome)
+    $bound = Get-WatchBoundIrcHome
+    # FR #97: never QUIT/kill another seat's IRC processes
+    if ($bound -and ($resolved.TrimEnd('\') -ne $bound.TrimEnd('\'))) {
+        Write-WatchLog ("irc disconnect refused foreign home {0} (bound={1})" -f $resolved, $bound)
+        return
+    }
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         Write-WatchLog "irc disconnect skipped (forbidden home)"
         return
@@ -1531,6 +1577,7 @@ function Get-WatchSeatNick {
     if ($State -and $State.ircNick) { return ([string]$State.ircNick).Trim() }
     $seatHome = $null
     if ($State -and $State.ircHome) { $seatHome = [string]$State.ircHome }
+    if (-not $seatHome) { $seatHome = Get-WatchBoundIrcHome }
     if (-not $seatHome) { $seatHome = [string]$IrcHome }
     if (-not $seatHome) { return '' }
     $coord = Join-Path $seatHome 'coordinator.pid'
@@ -2310,7 +2357,9 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($script:CursorModel) { $workerArgs += @('-Model', $script:CursorModel) }
     if ($PSBoundParameters.ContainsKey('Cwd')) { $workerArgs += @('-Cwd', $Cwd) }
     # Always pass bound slot home so seats 2/3/4 are distinct.
-    $workerArgs += @('-IrcHome', $IrcHome)
+    $homeForWorker = Get-WatchBoundIrcHome
+    if (-not $homeForWorker) { $homeForWorker = [string]$IrcHome }
+    $workerArgs += @('-IrcHome', $homeForWorker)
     if ($PSBoundParameters.ContainsKey('PollSeconds')) { $workerArgs += @('-PollSeconds', [string]$PollSeconds) }
     if ($PSBoundParameters.ContainsKey('CrashBackoffSeconds')) { $workerArgs += @('-CrashBackoffSeconds', [string]$CrashBackoffSeconds) }
     if ($PSBoundParameters.ContainsKey('LogPath')) { $workerArgs += @('-LogPath', $LogPath) }
@@ -2343,7 +2392,8 @@ function Register-WatchWorkerProcess {
     New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
     $self = $PID
     $kindFlag = if ($Cursor) { '-Cursor' } else { '-Grok' }
-    $seatHome = if ($script:BoundIrcHome) { $script:BoundIrcHome } else { [string]$IrcHome }
+    $seatHome = Get-WatchBoundIrcHome
+    if (-not $seatHome) { $seatHome = [string]$IrcHome }
     # Only retire stale workers on THIS slot home â€” never kill seats 2/3/4.
     foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
         $opid = [int]$row.ProcessId
@@ -2380,35 +2430,38 @@ function Unregister-WatchWorkerProcess {
     catch { }
 }
 
+# FR #97: do NOT create/truncate the default seat-1 log before Bind-WatchSlot.
+# Bind-WatchSlot sets per-slot LogFile and creates it only if missing.
 $script:LogFile = $LogPath
-if (-not $script:LogFile) {
-    $script:LogFile = Join-Path $env:USERPROFILE 'Desktop\Watch-AgentHealth\Watch-AgentHealth.log'
-}
-
-New-Item -ItemType File -Force -Path $script:LogFile | Out-Null
 if (-not $WatchWorker -and $Windows -eq 'on') {
     $WatchWorker = $true
 }
-# Next free .agentic-irc-watch-* / -2 / -3 â€¦ before spawning the detached worker.
+# Next free .agentic-irc-watch-* / -2 / -3 … before spawning the detached worker.
 Bind-WatchSlot
 Start-DetachedWatchWorkerIfNeeded
 $state = Read-WatchState
+$boundHome = Get-WatchBoundIrcHome
 if (-not $state) {
     $state = [pscustomobject]@{
         kind         = $script:KindName
         sessionId    = [guid]::NewGuid().ToString()
         seenSession  = $false
-        ircHome      = $IrcHome
+        ircHome      = $boundHome
         clientSlot   = $script:ClientSlot
         ircLogOffset = 0
         rootPid      = 0
     }
 }
+else {
+    # Never keep a sibling seat's ircHome from a misplaced state.json
+    $state.ircHome = $boundHome
+    $state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:ClientSlot -Force
+}
 if ($New) {
     $oldWatchSid = [string]$state.sessionId
     $state = Reset-WatchSessionForNew -State $state
     $state.kind = $script:KindName
-    $state.ircHome = $IrcHome
+    $state.ircHome = $boundHome
     $state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:ClientSlot -Force
     Write-WatchState -Obj $state
     Write-WatchLog "session reset (--new) session=$($state.sessionId) slot=$($script:ClientSlot)"
