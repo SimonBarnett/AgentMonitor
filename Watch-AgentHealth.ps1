@@ -1194,6 +1194,7 @@ function Get-CursorSeedPrompt {
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
         "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (own #{machine} channel only)."
         'Monitor posts !bored for you on start, after DONE, and while idle (own #{machine} only). Do not post busy/idle status yourself.'
+        'ACK/DONE outbox lines: start with ACK or DONE (no nick: prefix); append PRIVMSG only. Skills watch-seat / bob-git-accept have the exact wire.'
         'You are NOT on IRC by reading irc.log or counting processes — you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
@@ -1224,8 +1225,13 @@ function Get-AgentPrompt {
         'CAST IRON !bored: the monitor posts PRIVMSG #{machine} :!bored for you on seat start, right after your DONE, and every few minutes while idle. Never while busy. Do not post !bored or busy/idle chatter yourself.'
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
-        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you — treat a Jeeves assignment (<nick>: FR|MRB|UAT owner/repo#N <url>) like an ASSIGN: ACK <TYPE> owner/repo#N on #{machine}, do the job."
-        'DONE wire (exact, one line, nothing after URL): DONE <MODE as assigned> owner/repo#N [PASS|FAIL] <PR-url>. Extra detail on a separate outbox line. Then STOP — never post !bored (monitor-only).'
+        "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you — treat a Jeeves assignment (<nick>: FR|MRB|UAT owner/repo#N <url>) like an ASSIGN."
+        'CAST IRON ACK/DONE wire (Jeeves ignores anything else): each outbox chat line must START with the keyword — no nick: prefix, no prose before ACK/DONE.'
+        'ACK format (exact): ACK <FR|MRB|UAT> <owner/repo>#<n>   Example: ACK FR SimonBarnett/gh-Jeeves#74'
+        'DONE format (exact, one line, ends at URL): DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>   Example: DONE MRB SimonBarnett/gh-Jeeves#77 FAIL https://github.com/SimonBarnett/gh-Jeeves/pull/80'
+        'Nothing after the URL on a DONE line. Fix notes / labels / SHAs go on a SEPARATE outbox line. Then STOP — never post !bored (monitor-only).'
+        'Outbox: APPEND only (Add-Content / AppendAllText). Never Set-Content / Out-File without -Append (overwrite drops lines the irc_agent already sought past). Prefer: PRIVMSG #{machine} :<payload>'
+        'Wrong: "marchhare-42356: ACK …", "ACK implement …", "ACK #75 …", "DONE … FAIL note https://…". Right: keyword first, assigned MODE, owner/repo#n, then optional PASS|FAIL and URL.'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
@@ -1267,7 +1273,7 @@ function Get-GrokRules {
     if (Test-WatchNoBored) {
         return "Skills live at $skills. Loop seat: never !bored, never ACK/DONE to Jeeves, never fleet job loop. Monitor forwards FROM only. Harvest AgentMonitor playbooks to this repo when relevant."
     }
-    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills / bob-git-accept). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored; Jeeves assign → ACK → work → exact DONE <MODE> owner/repo#N [PASS|FAIL] <url> then STOP; never post !bored yourself."
+    return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills / bob-git-accept). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored; Jeeves assign → ACK FR|MRB|UAT owner/repo#N (line starts with ACK, no nick prefix) → work → DONE FR|MRB|UAT owner/repo#N [PASS|FAIL] <url> (nothing after URL) → STOP; append outbox only; never post !bored yourself."
 }
 
 function Get-DescendantPids {
@@ -1657,7 +1663,8 @@ function Format-WatchWakeText {
     if ($text.Length -gt $MaxLen) { $text = $text.Substring(0, $MaxLen) }
     $parts = Get-IrcFromParts -Line $text
     if ($parts -and $OurNick -and (Test-WatchIrcAddressedToNick -Text $parts.text -OurNick $OurNick)) {
-        return ('FOR YOU (your IRC nick is {0}; this line is addressed to you - act on it and reply on outbox to {1}): {2}' -f $OurNick, $parts.target, $text)
+        # FR #104: remind wire on every FOR YOU wake — agents copy nick: from the ear line otherwise.
+        return ('FOR YOU (your IRC nick is {0}; this line is addressed to you - act on it and reply on outbox to {1}). Outbox ACK/DONE: line must start with ACK or DONE (no {0}: prefix); append PRIVMSG only; DONE ends at the URL: {2}' -f $OurNick, $parts.target, $text)
     }
     return $text
 }

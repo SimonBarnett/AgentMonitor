@@ -35,14 +35,26 @@ post `!bored` or busy/idle chatter yourself. Jeeves assigns the next job when
 it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB|UAT owner/repo#N <url>`)
 like an ASSIGN: ACK on `#{machine}`, do the work, then exact DONE (below).
 
-## DONE wire (agentic_build #360 / bob-git-accept)
+## ACK / DONE wire (FR #104 / bob-git-accept)
 
-Exactly one line, MODE = assigned TYPE, nothing after the URL:
+Jeeves only parses lines that **start** with the keyword (after `PRIVMSG #chan :`).
+**No nick prefix.** Free text on a **separate** line.
 
-`DONE <MODE> <owner/repo>#<N> [PASS|FAIL] <PR-url>`
+```text
+ACK <FR|MRB|UAT> <owner/repo>#<n>
+DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>
+```
 
-Put fix PRs / SHAs / follow-ups on a **separate** outbox line. Then **STOP**
-(monitor sends the next `!bored`).
+Examples:
+
+```text
+PRIVMSG #marchhare :ACK FR SimonBarnett/gh-Jeeves#74
+PRIVMSG #marchhare :DONE MRB SimonBarnett/gh-Jeeves#77 FAIL https://github.com/SimonBarnett/gh-Jeeves/pull/80
+```
+
+Wrong: `marchhare-42356: ACK …`, `ACK implement …`, `ACK #75 …`, anything after the
+DONE URL. **Append** to `outbox.txt` only (`Add-Content` / `AppendAllText`) — never
+overwrite (`Set-Content` / `Out-File` without `-Append`). Then **STOP** (monitor `!bored`).
 
 ## Loop seat opt-out (FR #103)
 
