@@ -180,6 +180,108 @@ function Write-WatchLog {
     Write-Host $line
 }
 
+function Get-WatchSeatTranscriptPath {
+    # FR #90 Option B: operator-visible wake transcript (TUI does not reload hidden -p turns).
+    if (-not $script:StateDir) { return $null }
+    return (Join-Path $script:StateDir 'seat-wake-transcript.log')
+}
+
+function Write-WatchSeatTranscript {
+    param([string]$Message)
+    $path = Get-WatchSeatTranscriptPath
+    if (-not $path) {
+        Write-WatchLog $Message
+        return
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    $line = '{0:o} {1}' -f [datetime]::UtcNow, $Message
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::AppendAllText($path, $line + [Environment]::NewLine, $utf8)
+    Write-WatchLog $Message
+}
+
+function Test-WatchSeatTranscriptPaneAlive {
+    param([string]$TranscriptPath)
+    if (-not $TranscriptPath) { return $false }
+    $esc = [regex]::Escape($TranscriptPath)
+    $rows = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue)
+    foreach ($row in $rows) {
+        $cl = [string]$row.CommandLine
+        if ($cl -match 'seat-wake-transcript' -and $cl -match $esc) { return $true }
+    }
+    return $false
+}
+
+function Ensure-WatchSeatTranscriptPane {
+    # Visible console that tails seat-wake-transcript.log (Option B). No keystroke injection.
+    if ($script:AgentTuiWindowStyle -eq 'Hidden') { return $false }
+    $path = Get-WatchSeatTranscriptPath
+    if (-not $path) { return $false }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    if (-not (Test-Path -LiteralPath $path)) {
+        [IO.File]::WriteAllText($path, '', (New-Object System.Text.UTF8Encoding $false))
+    }
+    if (Test-WatchSeatTranscriptPaneAlive -TranscriptPath $path) { return $true }
+    $title = 'Watch seat IRC wake transcript (FR #90) - hidden -p turns appear here'
+    $escPath = $path.Replace("'", "''")
+    $escTitle = $title.Replace("'", "''")
+    $body = @(
+        "`$Host.UI.RawUI.WindowTitle = '$escTitle'"
+        "Write-Host 'Tailing $escPath'"
+        "Write-Host 'Hidden agent -p wakes are logged here so the seat does not look idle (AgentMonitor FR #90).'"
+        "Write-Host ''"
+        "Get-Content -LiteralPath '$escPath' -Wait -Tail 80 -Encoding UTF8"
+    ) -join [Environment]::NewLine
+    $launcher = Join-Path $script:StateDir 'seat-wake-transcript-pane.ps1'
+    [IO.File]::WriteAllText($launcher, $body, (New-Object System.Text.UTF8Encoding $false))
+    $psExe = (Get-Command powershell.exe).Source
+    Start-Process -FilePath $psExe -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', $launcher
+    ) -WindowStyle Normal | Out-Null
+    Write-WatchLog ('seat transcript pane started path={0}' -f $path)
+    return $true
+}
+
+function Start-WatchForwardExitWatcher {
+    # Non-blocking: wait for hidden wake PID and append end/exit to transcript + monitor log.
+    param(
+        [int]$ProcessId,
+        [string]$SessionId,
+        [string]$Kind,
+        [string]$TranscriptPath,
+        [string]$LogFile
+    )
+    if ($ProcessId -le 0) { return }
+    if (-not $script:StateDir) { return }
+    $psExe = (Get-Command powershell.exe).Source
+    $escTrans = ([string]$TranscriptPath).Replace("'", "''")
+    $escLog = ([string]$LogFile).Replace("'", "''")
+    $escSid = ([string]$SessionId).Replace("'", "''")
+    $escKind = ([string]$Kind).Replace("'", "''")
+    $scriptBody = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+`$pidWake = $ProcessId
+`$p = Get-Process -Id `$pidWake -ErrorAction SilentlyContinue
+`$code = 'unknown'
+`$ended = [datetime]::UtcNow.ToString('o')
+if (`$p) {
+    `$p.WaitForExit()
+    try { `$code = `$p.ExitCode } catch { `$code = 'n/a' }
+    `$ended = [datetime]::UtcNow.ToString('o')
+} else {
+    `$code = 'gone'
+}
+`$msg = ('wake end kind={0} session={1} pid={2} exit={3}' -f '$escKind', '$escSid', `$pidWake, `$code)
+`$line = '{0} {1}' -f `$ended, `$msg
+`$utf8 = New-Object System.Text.UTF8Encoding `$false
+if ('$escTrans') { [IO.File]::AppendAllText('$escTrans', `$line + [Environment]::NewLine, `$utf8) }
+if ('$escLog') { [IO.File]::AppendAllText('$escLog', `$line + [Environment]::NewLine, `$utf8) }
+"@
+    $waiter = Join-Path $script:StateDir ('forward-exit-waiter-{0}.ps1' -f $ProcessId)
+    [IO.File]::WriteAllText($waiter, $scriptBody, (New-Object System.Text.UTF8Encoding $false))
+    Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $waiter) -WindowStyle Hidden | Out-Null
+}
+
 function Read-WatchState {
     if (-not (Test-Path -LiteralPath $script:StatePath)) { return $null }
     try {
@@ -1647,10 +1749,14 @@ function Send-IrcLineToSession {
     if ($Grok) {
         $exe = Get-GrokAgentPath
         $args = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull, '-r', $sid, '-p', $text)
-        Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden | Out-Null
+        $fwdProc = Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden -PassThru
         $State = Set-WatchLastForward -State $State -Line $Line
         $State = Set-WatchBoredActivity -State $State
-        Write-WatchLog ('forward grok session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
+        $preview = $text.Substring(0, [Math]::Min(120, $text.Length))
+        $pidWake = 0
+        if ($fwdProc) { $pidWake = [int]$fwdProc.Id }
+        Write-WatchSeatTranscript ('wake start kind=grok session={0} pid={1} text={2}' -f $sid, $pidWake, $preview)
+        Start-WatchForwardExitWatcher -ProcessId $pidWake -SessionId $sid -Kind 'grok' -TranscriptPath (Get-WatchSeatTranscriptPath) -LogFile $script:LogFile
         return $State
     }
     $agentCmd = Get-CursorAgentCmd
@@ -1679,10 +1785,14 @@ function Send-IrcLineToSession {
     ) -join [Environment]::NewLine
     [IO.File]::WriteAllText($launch, $body, $utf8)
     $psExe = (Get-Command powershell.exe).Source
-    Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden | Out-Null
+    $fwdProc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden -PassThru
     $State = Set-WatchLastForward -State $State -Line $Line
     $State = Set-WatchBoredActivity -State $State
-    Write-WatchLog ('forward cursor session={0} {1}' -f $sid, $text.Substring(0, [Math]::Min(80, $text.Length)))
+    $preview = $text.Substring(0, [Math]::Min(120, $text.Length))
+    $pidWake = 0
+    if ($fwdProc) { $pidWake = [int]$fwdProc.Id }
+    Write-WatchSeatTranscript ('wake start kind=cursor session={0} pid={1} text={2}' -f $sid, $pidWake, $preview)
+    Start-WatchForwardExitWatcher -ProcessId $pidWake -SessionId $sid -Kind 'cursor' -TranscriptPath (Get-WatchSeatTranscriptPath) -LogFile $script:LogFile
     return $State
     }
     catch {
@@ -2120,6 +2230,9 @@ $state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:Cl
 [void](Clear-OrphanWatchProcessesOnStart -ResolvedHome ([string]$state.ircHome))
 # After orphan prune: always (re)connect IRC for this watch home (systray CAST IRON).
 $state = Ensure-WatchIrcSeat -State $state
+# FR #90 Option B: visible transcript pane for hidden -p wakes (operator sees work).
+[void](Ensure-WatchSeatTranscriptPane)
+Write-WatchSeatTranscript ('seat online kind={0} session={1} transcript={2}' -f $script:KindName, $state.sessionId, (Get-WatchSeatTranscriptPath))
 # FR #100: claim work immediately (deterministic !bored; no LLM).
 $state = Sync-WatchBored -State $state -Mode start
 if ($WatchWorker) {
