@@ -1401,6 +1401,7 @@ function Ensure-WatchIrcSeat {
                 "home=$resolved"
                 "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
             ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+            $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue $false -Force
             return $State
         }
         Write-WatchLog ("irc ensure stale live rows agentAlive={0} listenAlive={1} - relaunch" -f $agentAlive, $listenAlive)
@@ -1445,6 +1446,7 @@ function Ensure-WatchIrcSeat {
     }
     $agentPath = Join-Path $scripts 'irc_agent.py'
     $listenPath = Join-Path $scripts 'irc_listen.py'
+    $didConnect = $false
     if ($agents.Count -eq 0) {
         Write-WatchLog ("irc ensure start agent nick={0} channels={1} home={2}" -f $nick, $channels, $resolved)
         Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @(
@@ -1456,6 +1458,7 @@ function Ensure-WatchIrcSeat {
                 '--nick', $nick
             )) -WindowStyle Hidden | Out-Null
         Start-Sleep -Milliseconds 900
+        $didConnect = $true
     }
     $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
     if ($listens.Count -eq 0) {
@@ -1487,6 +1490,8 @@ function Ensure-WatchIrcSeat {
     }
     $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
     $State | Add-Member -NotePropertyName 'ircChannels' -NotePropertyValue $channels -Force
+    # Simon 2026-09-26: !bored on connect — re-arm start bored when irc_agent was (re)launched.
+    $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue ([bool]$didConnect) -Force
     return $State
 }
 
@@ -1983,10 +1988,23 @@ function Sync-WatchBored {
         $State | Add-Member -NotePropertyName 'boredIdleSinceUtc' -NotePropertyValue $null -Force
     }
 
-    $busy = Test-WatchSeatBoredBusy -State $State -OutboxPath $outbox -Now $Now
-    if ($busy) {
-        $State.boredIdleSinceUtc = $null
-        return $State
+    # Start/connect !bored must not be blocked by a stale open ACK left in outbox
+    # (Reload after disconnect used to skip reason=start forever). Live -p wakes still suppress.
+    if ($Mode -eq 'start') {
+        $sid = ''
+        if ($State -and $State.sessionId) { $sid = [string]$State.sessionId }
+        $grokKind = ($script:KindName -eq 'grok') -or [bool]$Grok
+        if (Test-WatchAgentWakeBusy -SessionId $sid -GrokKind:$grokKind) {
+            $State.boredIdleSinceUtc = $null
+            return $State
+        }
+    }
+    else {
+        $busy = Test-WatchSeatBoredBusy -State $State -OutboxPath $outbox -Now $Now
+        if ($busy) {
+            $State.boredIdleSinceUtc = $null
+            return $State
+        }
     }
 
     # Activity: any new outbox line resets idle clock.
@@ -3009,7 +3027,14 @@ $state = Clear-WatchWakeState -State $state
 # FR #90 Option B: visible transcript pane for hidden -p wakes (operator sees work).
 [void](Ensure-WatchSeatTranscriptPane)
 Write-WatchSeatTranscript ('seat online kind={0} session={1} transcript={2}' -f $script:KindName, $state.sessionId, (Get-WatchSeatTranscriptPath))
-# FR #100: claim work immediately (deterministic !bored; no LLM).
+# FR #100 + connect: !bored on seat start / IRC (re)connect / Reload (deterministic; no LLM).
+# Reload used to keep boredStartSent=true from state.json and skip the start !bored.
+$rearmBored = $Reload -or (
+    ($state.PSObject.Properties.Name -contains 'ircEnsureDidConnect') -and [bool]$state.ircEnsureDidConnect
+)
+if ($rearmBored) {
+    $state | Add-Member -NotePropertyName 'boredStartSent' -NotePropertyValue $false -Force
+}
 $state = Sync-WatchBored -State $state -Mode start
 if ($WatchWorker) {
     Register-WatchWorkerProcess
@@ -3037,6 +3062,12 @@ try {
             $li = @(Get-WatchIrcListenRows -ResolvedHome ([string]$state.ircHome))
             if ($ag.Count -eq 0 -or $li.Count -eq 0) {
                 $state = Ensure-WatchIrcSeat -State $state
+                # !bored on IRC reconnect (agent was down / relaunched).
+                if (($state.PSObject.Properties.Name -contains 'ircEnsureDidConnect') -and [bool]$state.ircEnsureDidConnect) {
+                    $state | Add-Member -NotePropertyName 'boredStartSent' -NotePropertyValue $false -Force
+                    $state = Sync-WatchBored -State $state -Mode start
+                    Write-WatchState -Obj $state
+                }
             }
         }
         # FR #126: root/console gone — monitor exits (finally writes watch-stop QUIT if needed).
