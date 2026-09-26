@@ -1424,20 +1424,16 @@ function Ensure-WatchIrcSeat {
                 $listens = @()
             }
             if ($agents.Count -gt 0 -and $listens.Count -gt 0) {
-                Write-WatchLog ("irc seat already up nick={0} seat={1} agent={2} listen={3} home={4}" -f $nick, $liveSeat, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
+                Write-WatchLog ("irc seat already up nick={0} seat={1} irc_agent={2} listen={3} home={4}" -f $nick, $liveSeat, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
                 if ($nick) {
                     $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
                     $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue $liveSeat -Force
                 }
                 $coordPath = Join-Path $resolved 'coordinator.pid'
-                @(
-                    "nick=$nick"
-                    "seat=$liveSeat"
-                    "listen=$($listens[0].ProcessId)"
-                    "agent=$($agents[0].ProcessId)"
-                    "home=$resolved"
-                    "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
-                ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+                Write-WatchCoordinatorPid -CoordPath $coordPath -Nick $nick -SeatPid $liveSeat `
+                    -ListenPid ([string]$listens[0].ProcessId) -IrcAgentPid ([string]$agents[0].ProcessId) `
+                    -Home $resolved -Channels (Get-WatchSeatChannels -MachineId (Get-WatchMachineId))
+                Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'already-up' -SeatPid $liveSeat -Nick $nick
                 $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue $false -Force
                 return $State
             }
@@ -1494,15 +1490,11 @@ function Ensure-WatchIrcSeat {
     $agentPath = Join-Path $scripts 'irc_agent.py'
     $listenPath = Join-Path $scripts 'irc_listen.py'
     $didConnect = $false
-    # Write coordinator BEFORE starting irc_agent so liveness/nick checks see live seat= (#136).
-    @(
-        "nick=$nick"
-        "seat=$seatPid"
-        'listen='
-        'agent='
-        "home=$resolved"
-        "channels=$channels"
-    ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+    # Write coordinator BEFORE starting irc_agent. agent= MUST be live seat host (#137),
+    # not the irc_agent PID (talk_seat_pid prefers agent= and PARTs on stale dead agent=).
+    Write-WatchCoordinatorPid -CoordPath $coordPath -Nick $nick -SeatPid $seatPid `
+        -ListenPid '' -IrcAgentPid '' -Home $resolved -Channels $channels
+    Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'pre-start' -SeatPid $seatPid -Nick $nick
     if ($agents.Count -eq 0) {
         Write-WatchLog ("irc ensure start agent nick={0} seat={1} channels={2} home={3}" -f $nick, $seatPid, $channels, $resolved)
         Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @(
@@ -1530,19 +1522,15 @@ function Ensure-WatchIrcSeat {
     $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
     $agentPid = if ($agents.Count -gt 0) { $agents[0].ProcessId } else { '' }
     $listenPid = if ($listens.Count -gt 0) { $listens[0].ProcessId } else { '' }
-    @(
-        "nick=$nick"
-        "seat=$seatPid"
-        "listen=$listenPid"
-        "agent=$agentPid"
-        "home=$resolved"
-        "channels=$channels"
-    ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+    Write-WatchCoordinatorPid -CoordPath $coordPath -Nick $nick -SeatPid $seatPid `
+        -ListenPid ([string]$listenPid) -IrcAgentPid ([string]$agentPid) `
+        -Home $resolved -Channels $channels
+    Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'post-ensure' -SeatPid $seatPid -Nick $nick
     if ($agents.Count -eq 0 -or $listens.Count -eq 0) {
-        Write-WatchLog ("irc ensure incomplete agent={0} listen={1}" -f $agentPid, $listenPid)
+        Write-WatchLog ("irc ensure incomplete irc_agent={0} listen={1}" -f $agentPid, $listenPid)
     }
     else {
-        Write-WatchLog ("irc ensure ok nick={0} agent={1} listen={2} channels={3}" -f $nick, $agentPid, $listenPid, $channels)
+        Write-WatchLog ("irc ensure ok nick={0} seat={1} irc_agent={2} listen={3} channels={4}" -f $nick, $seatPid, $agentPid, $listenPid, $channels)
     }
     $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
     $State | Add-Member -NotePropertyName 'ircChannels' -NotePropertyValue $channels -Force
@@ -1559,6 +1547,72 @@ function Get-WatchIrcAgentRows {
             $cl = [string]$_.CommandLine
             $cl -match 'irc_agent\.py' -and $cl -match $esc
         })
+}
+
+function Write-WatchCoordinatorPid {
+    # CAST IRON (AgentMonitor #137 / seat ended): talk_seat_pid.coordinator_seat_pid
+    # prefers agent= over seat=. If agent= is the irc_agent PID and that process is
+    # briefly dead/restarting, a NEW irc_agent reads dead agent= and PARTs "seat ended"
+    # even when the TUI (seat=) is alive. For watch seats, agent= MUST equal the live
+    # host seat PID (TUI/monitor). Real irc_agent PID goes in irc_agent= (ignored by
+    # talk_seat_pid liveness).
+    param(
+        [Parameter(Mandatory)][string]$CoordPath,
+        [Parameter(Mandatory)][string]$Nick,
+        [Parameter(Mandatory)][int]$SeatPid,
+        [string]$ListenPid = '',
+        [string]$IrcAgentPid = '',
+        [string]$Home = '',
+        [string]$Channels = ''
+    )
+    if ($SeatPid -le 0) { throw 'Write-WatchCoordinatorPid: SeatPid must be live host pid' }
+    if (-not $Channels) { $Channels = Get-WatchSeatChannels -MachineId (Get-WatchMachineId) }
+    if (-not $Home) { $Home = Split-Path -Parent $CoordPath }
+    @(
+        "nick=$Nick"
+        "seat=$SeatPid"
+        "listen=$ListenPid"
+        "agent=$SeatPid"
+        "irc_agent=$IrcAgentPid"
+        "home=$Home"
+        "channels=$Channels"
+    ) | Set-Content -LiteralPath $CoordPath -Encoding utf8
+}
+
+function Write-WatchIrcHealthSnapshot {
+    # Periodic / on-event IRC health for diagnosing PART seat ended / lost agent.
+    param(
+        [string]$ResolvedHome,
+        [string]$Tag = 'snap',
+        [int]$SeatPid = 0,
+        [string]$Nick = ''
+    )
+    if (-not $ResolvedHome) { return }
+    $resolved = [IO.Path]::GetFullPath($ResolvedHome)
+    $ag = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
+    $li = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    $agPid = if ($ag.Count) { [int]$ag[0].ProcessId } else { 0 }
+    $liPid = if ($li.Count) { [int]$li[0].ProcessId } else { 0 }
+    $seatAlive = if ($SeatPid -gt 0) { [bool](Get-Process -Id $SeatPid -ErrorAction SilentlyContinue) } else { $false }
+    $coord = Join-Path $resolved 'coordinator.pid'
+    $coordSeat = ''; $coordAgent = ''; $coordNick = ''; $coordIrcAgent = ''
+    if (Test-Path -LiteralPath $coord) {
+        foreach ($line in @(Get-Content -LiteralPath $coord -ErrorAction SilentlyContinue)) {
+            if ($line -match '^seat=(.*)$') { $coordSeat = $Matches[1].Trim() }
+            elseif ($line -match '^agent=(.*)$') { $coordAgent = $Matches[1].Trim() }
+            elseif ($line -match '^nick=(.*)$') { $coordNick = $Matches[1].Trim() }
+            elseif ($line -match '^irc_agent=(.*)$') { $coordIrcAgent = $Matches[1].Trim() }
+        }
+    }
+    $partHint = ''
+    $logPath = Join-Path $resolved 'irc.log'
+    if (Test-Path -LiteralPath $logPath) {
+        $tail = @(Get-Content -LiteralPath $logPath -Tail 8 -ErrorAction SilentlyContinue)
+        $hit = @($tail | Where-Object { $_ -match 'PART|seat ended|QUIT' } | Select-Object -Last 1)
+        if ($hit.Count) { $partHint = ([string]$hit[0]).Substring(0, [Math]::Min(120, ([string]$hit[0]).Length)) }
+    }
+    Write-WatchLog ("irc-health {0} nick={1} seat={2} seatAlive={3} procAgent={4} procListen={5} coordNick={6} coordSeat={7} coordAgent={8} coordIrcAgent={9} lastPart={10}" -f `
+            $Tag, $Nick, $SeatPid, $seatAlive, $agPid, $liPid, $coordNick, $coordSeat, $coordAgent, $coordIrcAgent, $partHint)
 }
 
 function Disconnect-WatchIrc {
@@ -1583,6 +1637,10 @@ function Disconnect-WatchIrc {
     $why = ([string]$Reason).Replace("`r", ' ').Replace("`n", ' ').Trim()
     if (-not $why) { $why = 'tui closed' }
     if ($why.Length -gt 80) { $why = $why.Substring(0, 80) }
+    $seatPid = 0
+    try { $seatPid = [int]$State.seatNickPid } catch { $seatPid = 0 }
+    if ($seatPid -le 0) { try { $seatPid = [int]$State.rootPid } catch { $seatPid = 0 } }
+    Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag ('disconnect-before:' + $why) -SeatPid $seatPid -Nick ([string]$State.ircNick)
     $utf8 = New-Object System.Text.UTF8Encoding $false
     [IO.File]::WriteAllText((Join-Path $resolved 'quit.req'), $why, $utf8)
     Write-WatchLog ("irc graceful PART+QUIT requested ({0}) home={1}" -f $why, $resolved)
@@ -1692,14 +1750,14 @@ function Get-AgentPrompt {
         'You are event-driven only off what the monitor forwards (a FROM line) or what Simon types here. Do not idle-wait in chat for the monitor; finish the turn after acting.'
         'Follow skills: agent-monitor + watch-seat (this repo .grok/skills), agentic-irc (no !bobiverse from this seat) and agentic_build. Harvest: harvest-agent-skills for build/fleet; IRC playbooks to SimonBarnett/agentic_irc; AgentMonitor playbooks stay in this repo.'
         "IRC home: $ResolvedIrcHome. Seat JOINs its own #{machine} ONLY (never #bobiverse or #agentic_irc; do not post there). Respond on the target channel in each FROM (outbox). Monitor tails irc.log; you do not."
-        'CAST IRON (Simon 2026-09-26): after every DONE the process MUST KEEP GOING — !bored on #{machine} so Jeeves assigns the next FR|MRB|UAT. Preferred: monitor posts PRIVMSG #{machine} :!bored within ~5s of DONE (also on start / idle). Continuity: if monitor is down, append PRIVMSG #{machine} :!bored in the same turn as DONE. Never while busy. No idle chatter.'
+        'CAST IRON (Simon 2026-09-26): after every DONE the process MUST KEEP GOING - !bored on #{machine} so Jeeves assigns the next FR|MRB|UAT. Preferred: monitor posts PRIVMSG #{machine} :!bored within ~5s of DONE (also on start / idle). Continuity: if monitor is down, append PRIVMSG #{machine} :!bored in the same turn as DONE. Never while busy. No idle chatter.'
         'Forbidden homes: ~/.agentic-irc-cursor, cursor-2, bobiverse Watch.'
         'On each wake: treat the payload as the task; reply on outbox if addressed or Simon asked the box. Bare ping/PING is auto-ponged by the watcher. Then end turn.'
         "Your IRC nick is nick= in $ResolvedIrcHome\coordinator.pid ({machine}-{monitor pid}, e.g. marchhare-34992). A wake starting FOR YOU is addressed to you - treat a Jeeves assignment (FR|MRB|UAT owner/repo#N url) like an ASSIGN."
         'CAST IRON ACK/DONE wire (Jeeves ignores anything else): each outbox chat line must START with the keyword - no nick: prefix, no prose before ACK/DONE.'
         'ACK format (exact): ACK <FR|MRB|UAT> <owner/repo>#<n>   Example: ACK FR SimonBarnett/gh-Jeeves#74'
         'DONE format (exact, one line, ends at URL): DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>'
-        'Nothing after the URL on a DONE line. Fix notes go on a SEPARATE outbox line. Then !bored (keep going) — do not park after one job.'
+        'Nothing after the URL on a DONE line. Fix notes go on a SEPARATE outbox line. Then !bored (keep going) - do not park after one job.'
         'Outbox: APPEND only (Add-Content / AppendAllText). Never Set-Content / Out-File without -Append.'
         'CAST IRON (AgentMonitor #133): ACK/DONE are BARE lines only (keyword first). irc_agent say() posts them on #{machine}. Do NOT wrap ACK/DONE as PRIVMSG (no PRIVMSG #chan :ACK, no nick PM).'
         'Wrong: PRIVMSG-wrapped ACK/DONE, nick-prefixed ACK, or text after DONE URL. Right: ACK MRB owner/repo#n'
@@ -3121,13 +3179,29 @@ try {
         if (-not $skipIrc) {
             $ag = @(Get-WatchIrcAgentRows -ResolvedHome ([string]$state.ircHome))
             $li = @(Get-WatchIrcListenRows -ResolvedHome ([string]$state.ircHome))
+            $snapSeat = 0
+            try { $snapSeat = [int]$state.seatNickPid } catch { $snapSeat = 0 }
+            if ($snapSeat -le 0) { try { $snapSeat = [int]$state.rootPid } catch { $snapSeat = 0 } }
             if ($ag.Count -eq 0 -or $li.Count -eq 0) {
+                Write-WatchLog ("irc missing agent={0} listen={1} - Ensure + health snap" -f $ag.Count, $li.Count)
+                Write-WatchIrcHealthSnapshot -ResolvedHome ([string]$state.ircHome) -Tag 'pre-reensure' -SeatPid $snapSeat -Nick ([string]$state.ircNick)
                 $state = Ensure-WatchIrcSeat -State $state
+                Write-WatchIrcHealthSnapshot -ResolvedHome ([string]$state.ircHome) -Tag 'post-reensure' -SeatPid $snapSeat -Nick ([string]$state.ircNick)
                 # !bored on IRC reconnect (agent was down / relaunched).
                 if (($state.PSObject.Properties.Name -contains 'ircEnsureDidConnect') -and [bool]$state.ircEnsureDidConnect) {
                     $state | Add-Member -NotePropertyName 'boredStartSent' -NotePropertyValue $false -Force
                     $state = Sync-WatchBored -State $state -Mode start
                     Write-WatchState -Obj $state
+                }
+            }
+            else {
+                # Periodic health (about every ~30s via tick counter)
+                if (-not ($state.PSObject.Properties.Name -contains 'ircHealthTick')) {
+                    $state | Add-Member -NotePropertyName 'ircHealthTick' -NotePropertyValue 0 -Force
+                }
+                $state.ircHealthTick = ([int]$state.ircHealthTick) + 1
+                if (([int]$state.ircHealthTick % 6) -eq 0) {
+                    Write-WatchIrcHealthSnapshot -ResolvedHome ([string]$state.ircHome) -Tag 'tick' -SeatPid $snapSeat -Nick ([string]$state.ircNick)
                 }
             }
         }
@@ -3244,7 +3318,7 @@ finally {
         }
     }
     if ($leaveIrc) {
-        # still refresh coordinator seat= to live TUI so irc_agent liveness stays correct
+        # Refresh coordinator: agent=/seat= stay as live TUI host (not irc_agent pid).
         try {
             $home = [string]$state.ircHome
             if ($home -and (Test-Path -LiteralPath (Join-Path $home 'coordinator.pid'))) {
@@ -3252,17 +3326,16 @@ finally {
                 if (-not $nick) { $nick = ('{0}-{1}' -f (Get-WatchMachineId), $rp) }
                 $ag = @(Get-WatchIrcAgentRows -ResolvedHome $home)
                 $li = @(Get-WatchIrcListenRows -ResolvedHome $home)
-                @(
-                    "nick=$nick"
-                    "seat=$rp"
-                    "listen=$(if ($li.Count) { $li[0].ProcessId } else { '' })"
-                    "agent=$(if ($ag.Count) { $ag[0].ProcessId } else { '' })"
-                    "home=$home"
-                    "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
-                ) | Set-Content -LiteralPath (Join-Path $home 'coordinator.pid') -Encoding utf8
+                Write-WatchCoordinatorPid -CoordPath (Join-Path $home 'coordinator.pid') -Nick $nick -SeatPid $rp `
+                    -ListenPid $(if ($li.Count) { [string]$li[0].ProcessId } else { '' }) `
+                    -IrcAgentPid $(if ($ag.Count) { [string]$ag[0].ProcessId } else { '' }) `
+                    -Home $home
+                Write-WatchIrcHealthSnapshot -ResolvedHome $home -Tag 'watch-stop-leave-irc' -SeatPid $rp -Nick $nick
             }
         }
-        catch { }
+        catch {
+            Write-WatchLog ("watch stop leave-irc coordinator refresh failed: {0}" -f $_.Exception.Message)
+        }
     }
     if ($WatchWorker) {
         Unregister-WatchWorkerProcess
