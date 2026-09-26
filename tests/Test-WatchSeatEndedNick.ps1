@@ -55,6 +55,16 @@ Check 'AM136c Ensure writes coordinator before start agent' {
     }
 }
 
+Check 'AM137 leave IRC when TUI still alive on watch stop' {
+    $src = Get-Content -LiteralPath $path -Raw
+    if ($src -notmatch 'TUI rootPid=.*still alive — leave IRC up') {
+        throw 'finally must leave IRC when TUI alive'
+    }
+    if ($src -notmatch 'Alive PID is enough for grok') {
+        throw 'Test-TreeHealthy must not use Responding for grok'
+    }
+}
+
 if ($fail -gt 0) { Write-Host "Test-WatchSeatEndedNick: $fail failed"; exit 1 }
 Write-Host 'Test-WatchSeatEndedNick: all passed'
 exit 0

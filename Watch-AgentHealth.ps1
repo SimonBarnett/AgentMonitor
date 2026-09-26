@@ -1778,6 +1778,12 @@ function Test-TreeHealthy {
         if ($gp) { $alive += $gp }
     }
     if ($alive.Count -eq 0) { return $false }
+    # Grok/Cursor console hosts often report Responding=$false on Windows even when
+    # healthy. Treating that as "unhealthy" called Complete-WatchSeatRootExit →
+    # Disconnect-WatchIrc (IRC drop while TUI still up). Alive PID is enough for grok.
+    if ($script:KindName -eq 'grok' -or [bool]$Grok) {
+        return $true
+    }
     $stuck = @($alive | Where-Object { $_.Responding -eq $false })
     if ($stuck.Count -gt 0 -and $stuck.Count -eq $alive.Count) { return $false }
     return $true
@@ -3217,8 +3223,46 @@ catch {
     Write-WatchLog ("watch fatal: $($_.Exception.Message)")
 }
 finally {
+    # Hotpatch / Reload / crash: if the interactive TUI is still alive, leave IRC up
+    # so the seat stays on channel (Disconnect was dropping IRC on every monitor exit).
+    $leaveIrc = $false
     if ($state) {
-        Disconnect-WatchIrc -State $state -Reason 'watch stop'
+        $rp = 0
+        try { $rp = [int]$state.rootPid } catch { $rp = 0 }
+        if ($rp -le 0 -and $current) {
+            try { $rp = [int]$current.RootPid } catch { $rp = 0 }
+        }
+        if ($rp -gt 0 -and (Get-Process -Id $rp -ErrorAction SilentlyContinue)) {
+            $leaveIrc = $true
+            Write-WatchLog ("watch stop: TUI rootPid={0} still alive — leave IRC up" -f $rp)
+        }
+        elseif (-not (Test-WatchSeatRootGone -State $state)) {
+            Disconnect-WatchIrc -State $state -Reason 'watch stop'
+        }
+        else {
+            Write-WatchLog 'watch stop: seatRootGone already tore down IRC'
+        }
+    }
+    if ($leaveIrc) {
+        # still refresh coordinator seat= to live TUI so irc_agent liveness stays correct
+        try {
+            $home = [string]$state.ircHome
+            if ($home -and (Test-Path -LiteralPath (Join-Path $home 'coordinator.pid'))) {
+                $nick = [string]$state.ircNick
+                if (-not $nick) { $nick = ('{0}-{1}' -f (Get-WatchMachineId), $rp) }
+                $ag = @(Get-WatchIrcAgentRows -ResolvedHome $home)
+                $li = @(Get-WatchIrcListenRows -ResolvedHome $home)
+                @(
+                    "nick=$nick"
+                    "seat=$rp"
+                    "listen=$(if ($li.Count) { $li[0].ProcessId } else { '' })"
+                    "agent=$(if ($ag.Count) { $ag[0].ProcessId } else { '' })"
+                    "home=$home"
+                    "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
+                ) | Set-Content -LiteralPath (Join-Path $home 'coordinator.pid') -Encoding utf8
+            }
+        }
+        catch { }
     }
     if ($WatchWorker) {
         Unregister-WatchWorkerProcess
