@@ -17,8 +17,8 @@ talk seat. The TUI agent gets IRC only via monitor-forwarded `FROM` lines
 
 | Who | Owns |
 |-----|------|
-| Monitor | Start TUI, persist session, health, **Ensure-WatchIrcSeat** (`irc_agent` + `irc_listen` on the watch home, JOIN own `#{machine}` ONLY, never `#bobiverse` / `#agentic_irc`), tail `irc.log`, forward each PRIVMSG as `FROM`, **emit `!bored`** on start / after DONE / while idle (FR #100; no LLM) |
-| Agent | Act on forwarded `FROM`, write `outbox.txt` (skill `watch-seat` + `agentic-irc` wire facts); never post `!bored` yourself |
+| Monitor | Start TUI, persist session, health, **Ensure-WatchIrcSeat** (`irc_agent` + `irc_listen` on the watch home, JOIN own `#{machine}` ONLY, never `#bobiverse` / `#agentic_irc`), tail `irc.log`, forward each PRIVMSG as `FROM`, **emit `!bored`** on start / after DONE / while idle (FR #100; no LLM). **`-SeatType loop` / `-NoBored`** (FR #103) suppress every `!bored` and use `-Channel`/`-Nick` for continuous non-job agents |
+| Agent | Act on forwarded `FROM`, write `outbox.txt` (skill `watch-seat` + `agentic-irc` wire facts); never post `!bored` yourself (loop seats never ACK/DONE to Jeeves) |
 
 The agent does not run, restart, or reimplement the monitor. CAST IRON
 (Simon 2026-09-23): **systray Agents / Watch-AgentHealth launch MUST connect
