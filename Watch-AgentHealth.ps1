@@ -2479,22 +2479,44 @@ function Update-WatchPendingForwardHang {
     $elapsed = ($now - [datetime]$prevAt).TotalMinutes
     if ($elapsed -lt $hangMin) { return $State }
 
-    # Hung: stop once, rotate session, redeliver pending FROM once
-    Write-WatchLog ("forward hung no-cpu pid={0} elapsedMin={1:N1} - stop+rotate once" -f $fwdPid, $elapsed)
+    # Hung: stop once; redeliver pending FROM. Do NOT rotate seat sessionId while the
+    # interactive TUI still hosts that session (rotate orphaned IRC/adopt and left
+    # seatRootGone sticky - marchhare 2026-09-26).
+    Write-WatchLog ("forward hung no-cpu pid={0} elapsedMin={1:N1} - stop+redeliver" -f $fwdPid, $elapsed)
     try { Stop-Process -Id $fwdPid -Force -ErrorAction SilentlyContinue } catch { }
     $State.pendingForwardPid = 0
     if ($State.PSObject.Properties.Name -contains 'wakePid') { $State.wakePid = 0 }
     $oldSid = [string]$State.sessionId
-    $cwdFull = [IO.Path]::GetFullPath($Cwd)
-    $dir = Resolve-GrokSessionDir -SessionId $oldSid -WorkDir $cwdFull
-    if ($dir) { [void](Archive-WatchSessionDir -SessionDir $dir -Reason 'hung') }
-    $State.sessionId = New-WatchSessionId
-    $State.seenSession = $false
-    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'hung' -Force
-    Write-WatchSessionHealthReport -Kind $(if ($Grok) { 'grok' } else { 'cursor' }) -Event 'session-rotate-hung' -Fields @{
-        old_session = $oldSid
-        new_session = $State.sessionId
-        hung_pid    = $fwdPid
+    $keepSid = $false
+    $rp = 0
+    try { $rp = [int]$State.rootPid } catch { $rp = 0 }
+    if ($rp -gt 0 -and $oldSid -and (Get-Process -Id $rp -ErrorAction SilentlyContinue)) {
+        $tui = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $rp) -ErrorAction SilentlyContinue
+        if ($tui -and ([string]$tui.CommandLine).IndexOf($oldSid, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $keepSid = $true
+        }
+    }
+    if ($keepSid) {
+        Write-WatchLog ("forward hung: keep TUI session {0} rootPid={1} (no seat session rotate)" -f $oldSid, $rp)
+        $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'hung-keep-tui-session' -Force
+        Write-WatchSessionHealthReport -Kind $(if ($Grok) { 'grok' } else { 'cursor' }) -Event 'session-hung-keep-tui' -Fields @{
+            session  = $oldSid
+            hung_pid = $fwdPid
+            root_pid = $rp
+        }
+    }
+    else {
+        $cwdFull = [IO.Path]::GetFullPath($Cwd)
+        $dir = Resolve-GrokSessionDir -SessionId $oldSid -WorkDir $cwdFull
+        if ($dir) { [void](Archive-WatchSessionDir -SessionDir $dir -Reason 'hung') }
+        $State.sessionId = New-WatchSessionId
+        $State.seenSession = $false
+        $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'hung' -Force
+        Write-WatchSessionHealthReport -Kind $(if ($Grok) { 'grok' } else { 'cursor' }) -Event 'session-rotate-hung' -Fields @{
+            old_session = $oldSid
+            new_session = $State.sessionId
+            hung_pid    = $fwdPid
+        }
     }
     $pendingLine = ''
     if ($State.PSObject.Properties.Name -contains 'pendingForwardLine') {
