@@ -71,6 +71,14 @@ param(
     [ValidateRange(5, 600)]
     [int]$ForwardDedupeSeconds = 60,
 
+    # FR #91: max runtime for a hidden agent -p / Cursor -p wake before kill (default 30 min).
+    [ValidateRange(60, 86400)]
+    [int]$WakeTimeoutSeconds = 1800,
+
+    # FR #91: max queued FROM lines while a wake is in flight for this session.
+    [ValidateRange(1, 100)]
+    [int]$WakeQueueMax = 20,
+
     # FR #103: fleet (default) vs loop (continuous non-job agent; never !bored / ACK-Jeeves).
     [ValidateSet('fleet', 'loop')]
     [string]$SeatType = 'fleet',
@@ -94,6 +102,8 @@ $script:BoredRepeatSeconds = [int]$BoredRepeatSeconds
 $script:BoredAckStaleMinutes = [int]$BoredAckStaleMinutes
 $script:BoredCheckSeconds = [int]$BoredCheckSeconds
 $script:ForwardDedupeSeconds = [int]$ForwardDedupeSeconds
+$script:WakeTimeoutSeconds = [int]$WakeTimeoutSeconds
+$script:WakeQueueMax = [int]$WakeQueueMax
 $script:SeatType = ([string]$SeatType).Trim().ToLowerInvariant()
 if (-not $script:SeatType) { $script:SeatType = 'fleet' }
 $script:NoBored = [bool]$NoBored -or ($script:SeatType -eq 'loop')
@@ -280,6 +290,180 @@ if ('$escLog') { [IO.File]::AppendAllText('$escLog', `$line + [Environment]::New
     $waiter = Join-Path $script:StateDir ('forward-exit-waiter-{0}.ps1' -f $ProcessId)
     [IO.File]::WriteAllText($waiter, $scriptBody, (New-Object System.Text.UTF8Encoding $false))
     Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $waiter) -WindowStyle Hidden | Out-Null
+}
+
+function Test-WatchProcessAlive {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) { return $false }
+    $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    return [bool]$p
+}
+
+function Test-WatchWakeInFlight {
+    # FR #91: true when state tracks a live wake PID (or OS still shows -p for session).
+    param($State)
+    if (-not $State) { return $false }
+    $wp = 0
+    if ($State.PSObject.Properties.Name -contains 'wakePid') {
+        try { $wp = [int]$State.wakePid } catch { $wp = 0 }
+    }
+    if ($wp -gt 0 -and (Test-WatchProcessAlive -ProcessId $wp)) { return $true }
+    $sid = ''
+    if ($State.sessionId) { $sid = [string]$State.sessionId }
+    $grokKind = ($script:KindName -eq 'grok') -or [bool]$Grok
+    return (Test-WatchAgentWakeBusy -SessionId $sid -GrokKind:$grokKind)
+}
+
+function Clear-WatchWakeState {
+    param($State, [string]$Reason = '')
+    if (-not $State) { return $State }
+    $State | Add-Member -NotePropertyName 'wakePid' -NotePropertyValue 0 -Force
+    $State | Add-Member -NotePropertyName 'wakeStartedUtc' -NotePropertyValue $null -Force
+    $State | Add-Member -NotePropertyName 'wakeKind' -NotePropertyValue '' -Force
+    if ($Reason) { Write-WatchLog $Reason }
+    return $State
+}
+
+function Add-WatchWakeQueue {
+    # Queue FROM while a wake is in flight; coalesce exact duplicate pending lines.
+    param($State, [string]$Line)
+    if (-not $State) { return $State }
+    $q = @()
+    if ($State.PSObject.Properties.Name -contains 'wakeQueue' -and $State.wakeQueue) {
+        $q = @($State.wakeQueue)
+    }
+    foreach ($existing in $q) {
+        if ([string]$existing -eq [string]$Line) {
+            Write-WatchLog 'forward queue coalesce (duplicate pending FROM)'
+            return $State
+        }
+    }
+    $max = [int]$script:WakeQueueMax
+    if ($max -le 0) { $max = 20 }
+    if ($q.Count -ge $max) {
+        $q = @($q | Select-Object -Skip 1)
+        Write-WatchLog ('forward queue overflow drop oldest max={0}' -f $max)
+    }
+    $q += ,[string]$Line
+    $State | Add-Member -NotePropertyName 'wakeQueue' -NotePropertyValue $q -Force
+    Write-WatchLog ('forward queued depth={0}' -f $q.Count)
+    return $State
+}
+
+function Pop-WatchWakeQueue {
+    param($State)
+    if (-not $State) { return @{ State = $State; Line = $null } }
+    $q = @()
+    if ($State.PSObject.Properties.Name -contains 'wakeQueue' -and $State.wakeQueue) {
+        $q = @($State.wakeQueue)
+    }
+    if ($q.Count -eq 0) {
+        $State | Add-Member -NotePropertyName 'wakeQueue' -NotePropertyValue @() -Force
+        return @{ State = $State; Line = $null }
+    }
+    $line = [string]$q[0]
+    $rest = @()
+    if ($q.Count -gt 1) { $rest = @($q | Select-Object -Skip 1) }
+    $State | Add-Member -NotePropertyName 'wakeQueue' -NotePropertyValue $rest -Force
+    return @{ State = $State; Line = $line }
+}
+
+function Stop-OrphanWatchWakeProcesses {
+    # FR #91: on monitor start, kill orphaned -p wakes whose parent is dead.
+    # Never touch interactive TUI (agent.exe / cursor-agent without -p).
+    param(
+        [string]$SessionId,
+        [switch]$GrokKind
+    )
+    $sid = ([string]$SessionId).Trim()
+    $killed = 0
+    $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    foreach ($row in $rows) {
+        $cl = [string]$row.CommandLine
+        $procId = [int]$row.ProcessId
+        $isWake = $false
+        if ($GrokKind) {
+            if ([string]$row.Name -ne 'agent.exe') { continue }
+            if ($cl -notmatch ' -p(\s|$)') { continue } # live TUI: keep
+            if ($sid -and $cl -notmatch (' -r\s+' + [regex]::Escape($sid) + '\b')) { continue }
+            $isWake = $true
+        }
+        else {
+            if ([string]$row.Name -eq 'powershell.exe' -and $cl -match 'forward-cursor\.ps1') {
+                if ($script:StateDir -and $cl -notmatch [regex]::Escape($script:StateDir)) { continue }
+                $isWake = $true
+            }
+            elseif ($sid -and $cl -match 'cursor-agent' -and $cl -match [regex]::Escape($sid) -and $cl -match ' -p ') {
+                $isWake = $true
+            }
+            else { continue }
+        }
+        if (-not $isWake) { continue }
+        $ppid = 0
+        try { $ppid = [int]$row.ParentProcessId } catch { $ppid = 0 }
+        $parentAlive = ($ppid -gt 0) -and (Test-WatchProcessAlive -ProcessId $ppid)
+        if ($parentAlive -and $ppid -eq $PID) { continue } # ours, still running
+        if ($parentAlive) { continue } # another live parent owns it
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+        Write-WatchLog ('wake orphan reaped pid={0} parent={1} session={2}' -f $procId, $ppid, $sid)
+        $killed++
+    }
+    return $killed
+}
+
+function Sync-WatchWakeLifecycle {
+    # FR #91: reap finished/timed-out wakes; dequeue next FROM when idle.
+    param(
+        $State,
+        [datetime]$Now = $(Get-Date),
+        [switch]$StartNext
+    )
+    if (-not $State) { return $State }
+    $wp = 0
+    if ($State.PSObject.Properties.Name -contains 'wakePid') {
+        try { $wp = [int]$State.wakePid } catch { $wp = 0 }
+    }
+    $started = $null
+    if ($State.PSObject.Properties.Name -contains 'wakeStartedUtc' -and $State.wakeStartedUtc) {
+        try { $started = [datetime]$State.wakeStartedUtc } catch { $started = $null }
+    }
+    $kind = 'wake'
+    if ($State.PSObject.Properties.Name -contains 'wakeKind' -and $State.wakeKind) {
+        $kind = [string]$State.wakeKind
+    }
+    $sid = ''
+    if ($State.sessionId) { $sid = [string]$State.sessionId }
+
+    if ($wp -gt 0) {
+        $alive = Test-WatchProcessAlive -ProcessId $wp
+        $timeoutSec = [int]$script:WakeTimeoutSeconds
+        if ($timeoutSec -le 0) { $timeoutSec = 1800 }
+        $age = 0.0
+        if ($started) { $age = ($Now - $started).TotalSeconds }
+        if ($alive -and $started -and $age -ge $timeoutSec) {
+            Stop-Process -Id $wp -Force -ErrorAction SilentlyContinue
+            $msg = ('wake timeout kind={0} session={1} pid={2} ageSec={3}' -f $kind, $sid, $wp, [int]$age)
+            Write-WatchSeatTranscript $msg
+            $State = Clear-WatchWakeState -State $State -Reason $msg
+            $wp = 0
+        }
+        elseif (-not $alive) {
+            $msg = ('wake cleared kind={0} session={1} pid={2} (process gone)' -f $kind, $sid, $wp)
+            Write-WatchSeatTranscript $msg
+            $State = Clear-WatchWakeState -State $State -Reason $msg
+            $wp = 0
+        }
+    }
+
+    if ($StartNext -and $wp -le 0 -and -not (Test-WatchWakeInFlight -State $State)) {
+        $pop = Pop-WatchWakeQueue -State $State
+        $State = $pop.State
+        if ($pop.Line) {
+            Write-WatchLog 'forward dequeue next FROM'
+            $State = Send-IrcLineToSession -State $State -Line $pop.Line
+        }
+    }
+    return $State
 }
 
 function Read-WatchState {
@@ -1748,6 +1932,11 @@ function Send-IrcLineToSession {
         Write-WatchLog ('listen {0}' -f $trim.Substring(0, [Math]::Min(120, $trim.Length)))
     }
     if (Test-DropIrcLine -Line $Line) { return $State }
+    # FR #91: clear finished/timed-out wake before deciding to start or queue.
+    $State = Sync-WatchWakeLifecycle -State $State -StartNext:$false
+    if (Test-WatchWakeInFlight -State $State) {
+        return (Add-WatchWakeQueue -State $State -Line $Line)
+    }
     $inbox = Join-Path $script:StateDir 'agent-inbox.txt'
     Add-Content -LiteralPath $inbox -Value $Line -Encoding utf8
     $cwdFull = [IO.Path]::GetFullPath($Cwd)
@@ -1762,6 +1951,9 @@ function Send-IrcLineToSession {
         $preview = $text.Substring(0, [Math]::Min(120, $text.Length))
         $pidWake = 0
         if ($fwdProc) { $pidWake = [int]$fwdProc.Id }
+        $State | Add-Member -NotePropertyName 'wakePid' -NotePropertyValue $pidWake -Force
+        $State | Add-Member -NotePropertyName 'wakeStartedUtc' -NotePropertyValue (Get-Date) -Force
+        $State | Add-Member -NotePropertyName 'wakeKind' -NotePropertyValue 'grok' -Force
         Write-WatchSeatTranscript ('wake start kind=grok session={0} pid={1} text={2}' -f $sid, $pidWake, $preview)
         Start-WatchForwardExitWatcher -ProcessId $pidWake -SessionId $sid -Kind 'grok' -TranscriptPath (Get-WatchSeatTranscriptPath) -LogFile $script:LogFile
         return $State
@@ -1775,10 +1967,6 @@ function Send-IrcLineToSession {
     $escCwd = $cwdFull.Replace("'", "''")
     $escAgent = $agentCmd.Replace("'", "''")
     $escSid = $sid.Replace("'", "''")
-    if (Test-CursorAgentForwardBusy -SessionId $sid) {
-        Write-WatchLog ('forward skipped (agent -p already running session={0})' -f $sid)
-        return $State
-    }
     $fwdAgent = "& '$escAgent' --trust --force$(Format-CursorModelCliFragment) --workspace '$escCwd' -p -- `$prompt"
     $fwdResume = Test-CursorUseResumeCli -State $State
     if ($fwdResume) {
@@ -1798,6 +1986,9 @@ function Send-IrcLineToSession {
     $preview = $text.Substring(0, [Math]::Min(120, $text.Length))
     $pidWake = 0
     if ($fwdProc) { $pidWake = [int]$fwdProc.Id }
+    $State | Add-Member -NotePropertyName 'wakePid' -NotePropertyValue $pidWake -Force
+    $State | Add-Member -NotePropertyName 'wakeStartedUtc' -NotePropertyValue (Get-Date) -Force
+    $State | Add-Member -NotePropertyName 'wakeKind' -NotePropertyValue 'cursor' -Force
     Write-WatchSeatTranscript ('wake start kind=cursor session={0} pid={1} text={2}' -f $sid, $pidWake, $preview)
     Start-WatchForwardExitWatcher -ProcessId $pidWake -SessionId $sid -Kind 'cursor' -TranscriptPath (Get-WatchSeatTranscriptPath) -LogFile $script:LogFile
     return $State
@@ -2128,6 +2319,8 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($PSBoundParameters.ContainsKey('BoredAckStaleMinutes')) { $workerArgs += @('-BoredAckStaleMinutes', [string]$BoredAckStaleMinutes) }
     if ($PSBoundParameters.ContainsKey('BoredCheckSeconds')) { $workerArgs += @('-BoredCheckSeconds', [string]$BoredCheckSeconds) }
     if ($PSBoundParameters.ContainsKey('ForwardDedupeSeconds')) { $workerArgs += @('-ForwardDedupeSeconds', [string]$ForwardDedupeSeconds) }
+    if ($PSBoundParameters.ContainsKey('WakeTimeoutSeconds')) { $workerArgs += @('-WakeTimeoutSeconds', [string]$WakeTimeoutSeconds) }
+    if ($PSBoundParameters.ContainsKey('WakeQueueMax')) { $workerArgs += @('-WakeQueueMax', [string]$WakeQueueMax) }
     if ($script:SeatType -and $script:SeatType -ne 'fleet') { $workerArgs += @('-SeatType', $script:SeatType) }
     if ($NoBored -or $script:NoBored) { $workerArgs += '-NoBored' }
     if ($script:WatchChannelOverride) { $workerArgs += @('-Channel', $script:WatchChannelOverride) }
@@ -2237,6 +2430,13 @@ $state | Add-Member -NotePropertyName 'clientSlot' -NotePropertyValue $script:Cl
 [void](Clear-OrphanWatchProcessesOnStart -ResolvedHome ([string]$state.ircHome))
 # After orphan prune: always (re)connect IRC for this watch home (systray CAST IRON).
 $state = Ensure-WatchIrcSeat -State $state
+# FR #91: reap orphaned -p wakes from a dead previous monitor (never touch TUI without -p).
+$orphanKind = ($script:KindName -eq 'grok') -or [bool]$Grok
+$nOrphans = Stop-OrphanWatchWakeProcesses -SessionId ([string]$state.sessionId) -GrokKind:$orphanKind
+if ($nOrphans -gt 0) {
+    Write-WatchLog ("wake orphans reaped count={0}" -f $nOrphans)
+}
+$state = Clear-WatchWakeState -State $state
 # FR #90 Option B: visible transcript pane for hidden -p wakes (operator sees work).
 [void](Ensure-WatchSeatTranscriptPane)
 Write-WatchSeatTranscript ('seat online kind={0} session={1} transcript={2}' -f $script:KindName, $state.sessionId, (Get-WatchSeatTranscriptPath))
@@ -2339,7 +2539,10 @@ try {
         # IRC forward runs on the same tick (cheap irc.log tail).
         $boredCheck = [int]$script:BoredCheckSeconds
         if ($boredCheck -le 0) { $boredCheck = 5 }
+        # FR #91: timeout/reap wake; dequeue next FROM when free.
+        $state = Sync-WatchWakeLifecycle -State $state -StartNext
         $state = Sync-IrcForward -State $state
+        $state = Sync-WatchWakeLifecycle -State $state -StartNext
         $state = Sync-WatchBored -State $state -Mode poll
         Write-WatchState -Obj $state
         Start-Sleep -Seconds $boredCheck
