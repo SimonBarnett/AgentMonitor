@@ -61,7 +61,20 @@ param(
 
     # Open ACK without DONE older than this is treated as stale (not busy).
     [ValidateRange(5, 240)]
-    [int]$BoredAckStaleMinutes = 45
+    [int]$BoredAckStaleMinutes = 45,
+
+    # FR #103: fleet (default) vs loop (continuous non-job agent; never !bored / ACK-Jeeves).
+    [ValidateSet('fleet', 'loop')]
+    [string]$SeatType = 'fleet',
+
+    # FR #103: suppress every monitor !bored (implied by -SeatType loop).
+    [switch]$NoBored,
+
+    # FR #103: loop seat IRC channel (e.g. '#ce-priority-dev1'). Fleet ignores (own #{machine}).
+    [string]$Channel = '',
+
+    # FR #103: loop seat nick (e.g. 'dayworks-dev1'). Must NOT match {machine}-{pid} worker grammar.
+    [string]$Nick = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,6 +84,26 @@ $script:CursorModel = ([string]$Model).Trim()
 $script:BoredIdleSeconds = [int]$BoredIdleSeconds
 $script:BoredRepeatSeconds = [int]$BoredRepeatSeconds
 $script:BoredAckStaleMinutes = [int]$BoredAckStaleMinutes
+$script:SeatType = ([string]$SeatType).Trim().ToLowerInvariant()
+if (-not $script:SeatType) { $script:SeatType = 'fleet' }
+$script:NoBored = [bool]$NoBored -or ($script:SeatType -eq 'loop')
+$script:WatchChannelOverride = ([string]$Channel).Trim()
+$script:WatchNickOverride = ([string]$Nick).Trim()
+if ($script:SeatType -eq 'loop') {
+    if (-not $script:WatchChannelOverride) {
+        throw 'Loop seat (-SeatType loop) requires -Channel (e.g. -Channel ''#ce-priority-dev1'').'
+    }
+    if (-not $script:WatchNickOverride) {
+        throw 'Loop seat (-SeatType loop) requires -Nick (non-worker nick, e.g. -Nick ''dayworks-dev1'').'
+    }
+    # Reject worker grammar so Jeeves/gh-Jeeves never assign or mark busy/idle (K1/K2).
+    if ($script:WatchNickOverride -match '^[A-Za-z0-9_]+-\d+$') {
+        throw ("Loop seat -Nick '{0}' looks like a worker {{machine}}-{{pid}} nick. Use a non-worker nick (e.g. dayworks-dev1)." -f $script:WatchNickOverride)
+    }
+}
+function Test-WatchNoBored {
+    return [bool]$script:NoBored
+}
 
 function Get-CursorModelCliArgs {
     if (-not $script:CursorModel) { return @() }
@@ -771,6 +804,7 @@ function Try-AdoptLiveWatchAgent {
 
 function Resolve-StableWatchIrcNick {
     # Keep seat nick across monitor PID change while irc_agent for that nick is live (FR #89).
+    # FR #103: loop seats use -Nick override (non-worker grammar).
     param(
         $State,
         [string]$MachineId,
@@ -778,6 +812,9 @@ function Resolve-StableWatchIrcNick {
         [int]$DefaultSeatPid,
         [object[]]$AgentRows = @()
     )
+    if ($script:WatchNickOverride) {
+        return ([string]$script:WatchNickOverride).Trim()
+    }
     $mid = ([string]$MachineId).Trim().ToLowerInvariant()
     $agents = @($AgentRows)
     if ($agents.Count -eq 0 -and $ResolvedHome) {
@@ -843,12 +880,28 @@ function Clear-WatchStaleQuitRequest {
 }
 
 function Get-WatchSeatChannels {
-    # CAST IRON (Simon 2026-09-25): worker / watch seats JOIN their own #{machine} ONLY.
+    # CAST IRON (Simon 2026-09-25): fleet worker / watch seats JOIN their own #{machine} ONLY.
     # Never #bobiverse (bob-{machine} ears, Jeeves and humans only) and never #agentic_irc or extras.
+    # FR #103: loop seats JOIN -Channel only (still never #bobiverse / #agentic_irc).
     param([string]$MachineId)
+    if ($script:WatchChannelOverride) {
+        $c = ([string]$script:WatchChannelOverride).Trim()
+        if ($c -notmatch '^#') { $c = '#' + $c.TrimStart('#') }
+        $c = $c.ToLowerInvariant()
+        if ($c -match '(?i)^#(bobiverse|agentic_irc)$') {
+            throw ("Loop/fleet seat must not JOIN {0}" -f $c)
+        }
+        return $c
+    }
     $m = ([string]$MachineId).Trim().TrimStart('#').ToLowerInvariant()
     if (-not $m) { $m = ([string]$env:COMPUTERNAME).Trim().ToLowerInvariant() }
     return ('#' + $m)
+}
+
+function Test-WatchWorkerNickGrammar {
+    # gh-Jeeves / agentic_irc treat {machine}-{pid} as a shop worker.
+    param([string]$Nick)
+    return ([string]$Nick -match '^[A-Za-z0-9_]+-\d+$')
 }
 
 function Ensure-WatchIrcSeat {
@@ -1016,6 +1069,15 @@ function Disconnect-WatchIrc {
 
 function Get-CursorSeedPrompt {
     param([string]$ResolvedIrcHome)
+    if (Test-WatchNoBored) {
+        $chan = if ($script:WatchChannelOverride) { $script:WatchChannelOverride } else { '#{channel}' }
+        $nick = if ($script:WatchNickOverride) { $script:WatchNickOverride } else { 'loop-nick' }
+        return @(
+            'Loop seat online (continuous agent; not a fleet job worker).'
+            "IRC home $ResolvedIrcHome. Monitor JOINed $chan as $nick only."
+            'No !bored, no ACK/DONE to Jeeves, no fleet job loop. Act on monitor FROM forwards; reply on outbox. No UAT.'
+        ) -join ' '
+    }
     return @(
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
         "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (own #{machine} channel only)."
@@ -1026,6 +1088,20 @@ function Get-CursorSeedPrompt {
 
 function Get-AgentPrompt {
     param([string]$ResolvedIrcHome)
+    if (Test-WatchNoBored) {
+        $chan = if ($script:WatchChannelOverride) { $script:WatchChannelOverride } else { '#{channel}' }
+        $nick = if ($script:WatchNickOverride) { $script:WatchNickOverride } else { 'loop-nick' }
+        return @(
+            'You are a continuous loop agent on this Windows box (NOT a fleet job worker).'
+            'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, irc_agent+irc_listen, tail irc.log, forward FROM). You do not run or reimplement the monitor.'
+            "IRC home: $ResolvedIrcHome. You JOIN only $chan as nick $nick. Never #bobiverse. Never join the fleet shop job loop."
+            'HARD RULES: never post !bored; never ACK/DONE/NACK to Jeeves; never !list; never claim busy/idle on the digest webhook.'
+            'Take commands only from Simon (or the human operator). Post progress with the project prefix when required (e.g. [dayworks]). Ask Simon questions as QUESTION lines when stuck.'
+            'CAST IRON: IRC arrives only as monitor-forwarded FROM lines. Prefer that wake path; do not arm in-session ^FROM TSR.'
+            'On each wake: act on the payload if it is for you or Simon asked; reply on outbox to your channel. Bare ping/PING is watcher auto-pong. Then end turn.'
+            'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
+        ) -join ' '
+    }
     return @(
         'You are a fleet agent on this Windows box (watch seat).'
         'Split: Watch-AgentHealth.ps1 is the deterministic monitor (health, start irc_agent+irc_listen, tail irc.log, forward each IRC PRIVMSG into this session as FROM). You do not run, restart, or reimplement the monitor.'
@@ -1075,6 +1151,9 @@ function ConvertTo-WatchProcessArgumentString {
 
 function Get-GrokRules {
     $skills = Join-Path $env:USERPROFILE '.grok\skills'
+    if (Test-WatchNoBored) {
+        return "Skills live at $skills. Loop seat: never !bored, never ACK/DONE to Jeeves, never fleet job loop. Monitor forwards FROM only. Harvest AgentMonitor playbooks to this repo when relevant."
+    }
     return "Skills live at $skills. Follow agent-monitor, watch-seat, agentic-irc and agentic_build (including harvest-agent-skills). CAST IRON harvest AgentMonitor playbooks to this repo; fleet to agentic_build; IRC to agentic_irc. Monitor owns !bored (start/DONE/idle on #{machine}); treat Jeeves assignment lines as ASSIGN (ACK, work, DONE); never post busy/idle yourself."
 }
 
@@ -1272,6 +1351,7 @@ function Test-WatchSeatBoredBusy {
 
 function Get-WatchBoredChannel {
     # CAST IRON: !bored only in own #{machine}. Never #bobiverse / #agentic_irc / nick PRIVMSG.
+    # Loop seats never call Send-WatchIrcBored (Test-WatchNoBored), but keep channel helper consistent.
     param([string]$MachineId = '')
     $mid = ([string]$MachineId).Trim()
     if (-not $mid) { $mid = Get-WatchMachineId }
@@ -1327,6 +1407,7 @@ function Get-WatchOutboxDoneKey {
 function Sync-WatchBored {
     # FR #100: monitor emits !bored on start, after DONE, and while idle — never while busy.
     # Works with zero model tokens. Own #{machine} only.
+    # FR #103: -NoBored / -SeatType loop suppresses every !bored trigger.
     param(
         $State,
         [ValidateSet('poll', 'start')]
@@ -1334,6 +1415,9 @@ function Sync-WatchBored {
         [datetime]$Now = $(Get-Date)
     )
     if (-not $State) { return $State }
+    if (Test-WatchNoBored) {
+        return $State
+    }
     $seatHome = [string]$State.ircHome
     if (-not $seatHome) { return $State }
     $resolved = [IO.Path]::GetFullPath($seatHome)
@@ -1857,6 +1941,13 @@ function Start-DetachedWatchWorkerIfNeeded {
     if ($PSBoundParameters.ContainsKey('CrashBackoffSeconds')) { $workerArgs += @('-CrashBackoffSeconds', [string]$CrashBackoffSeconds) }
     if ($PSBoundParameters.ContainsKey('LogPath')) { $workerArgs += @('-LogPath', $LogPath) }
     elseif ($script:LogFile) { $workerArgs += @('-LogPath', $script:LogFile) }
+    if ($PSBoundParameters.ContainsKey('BoredIdleSeconds')) { $workerArgs += @('-BoredIdleSeconds', [string]$BoredIdleSeconds) }
+    if ($PSBoundParameters.ContainsKey('BoredRepeatSeconds')) { $workerArgs += @('-BoredRepeatSeconds', [string]$BoredRepeatSeconds) }
+    if ($PSBoundParameters.ContainsKey('BoredAckStaleMinutes')) { $workerArgs += @('-BoredAckStaleMinutes', [string]$BoredAckStaleMinutes) }
+    if ($script:SeatType -and $script:SeatType -ne 'fleet') { $workerArgs += @('-SeatType', $script:SeatType) }
+    if ($NoBored -or $script:NoBored) { $workerArgs += '-NoBored' }
+    if ($script:WatchChannelOverride) { $workerArgs += @('-Channel', $script:WatchChannelOverride) }
+    if ($script:WatchNickOverride) { $workerArgs += @('-Nick', $script:WatchNickOverride) }
     $log = $LogPath
     if (-not $log) { $log = $script:LogFile }
     if (-not $log) {

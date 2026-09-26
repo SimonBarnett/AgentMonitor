@@ -27,6 +27,13 @@ post `!bored` or busy/idle chatter yourself. Jeeves assigns the next job when
 it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB owner/repo#N <url>`)
 like an ASSIGN: ACK on `#{machine}`, do the work, DONE.
 
+## Loop seat opt-out (FR #103)
+
+`-SeatType loop -Channel '#…' -Nick <non-worker>` (or `-NoBored`) turns off
+every monitor `!bored` and the fleet ACK/DONE brief. Use a nick that is **not**
+`{machine}-{pid}` so Jeeves never assigns. Health, crash-backoff, and FROM
+forwarding still run for that channel only.
+
 ## CAST IRON — IRC arrives from the watcher (Simon 2026-09-23)
 
 You are **not** "on IRC" by reading `irc.log`, counting `irc_agent` /
