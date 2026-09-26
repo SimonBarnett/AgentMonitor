@@ -2235,31 +2235,38 @@ function Ensure-WatchSessionBeforeResume {
     if (-not (Test-WatchSessionNeedsRotation -SizeInfo $info -MaxUpdatesMb $maxMb)) {
         return $State
     }
-    # Always mint a new session id once oversized is detected so -p resume does
-    # not keep hammering a locked/huge dir. Archive is best-effort: if Move-Item
-    # fails (TUI file lock), keep the old folder and still forward on the new id.
+    # Archive is best-effort. If Move-Item fails (live TUI locks updates.jsonl),
+    # keep the existing sessionId so -p still wakes the visible seat, and do not
+    # throw (that used to abort the whole IRC forward on marchhare).
     $arch = Archive-WatchSessionDir -SessionDir $dir -Reason 'oversized'
     $old = $sid
-    $State.sessionId = New-WatchSessionId
-    $State.seenSession = $false
-    if ($State.PSObject.Properties.Name -contains 'cursorSessionValid') {
-        try { $State.PSObject.Properties.Remove('cursorSessionValid') } catch { }
+    if ($arch.ok) {
+        $State.sessionId = New-WatchSessionId
+        $State.seenSession = $false
+        if ($State.PSObject.Properties.Name -contains 'cursorSessionValid') {
+            try { $State.PSObject.Properties.Remove('cursorSessionValid') } catch { }
+        }
+        $State | Add-Member -NotePropertyName 'lastSessionRotate' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+        $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'oversized' -Force
+        Write-WatchLog ("session rotate oversized old={0} new={1} updatesMb={2:N1} archive={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.archivePath)
+        Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized' -Fields @{
+            old_session = $old
+            new_session = $State.sessionId
+            updates_mb  = [Math]::Round(($info.UpdatesBytes / 1MB), 2)
+            archive     = $arch.archivePath
+            archive_ok  = $true
+        }
+        return $State
     }
     $State | Add-Member -NotePropertyName 'lastSessionRotate' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
-    $rotateReason = if ($arch.ok) { 'oversized' } else { 'oversized-archive-failed' }
-    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue $rotateReason -Force
-    if ($arch.ok) {
-        Write-WatchLog ("session rotate oversized old={0} new={1} updatesMb={2:N1} archive={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.archivePath)
-    }
-    else {
-        Write-WatchLog ("session rotate oversized archive-failed keep-old={0} new={1} updatesMb={2:N1} reason={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.reason)
-    }
-    Write-WatchSessionHealthReport -Kind $Kind -Event $(if ($arch.ok) { 'session-rotate-oversized' } else { 'session-rotate-oversized-archive-failed' }) -Fields @{
+    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'oversized-archive-failed' -Force
+    Write-WatchLog ("session rotate oversized archive-failed keep-session={0} updatesMb={1:N1} reason={2}" -f $old, ($info.UpdatesBytes / 1MB), $arch.reason)
+    Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized-archive-failed' -Fields @{
         old_session = $old
-        new_session = $State.sessionId
+        new_session = $old
         updates_mb  = [Math]::Round(($info.UpdatesBytes / 1MB), 2)
-        archive     = $arch.archivePath
-        archive_ok  = [bool]$arch.ok
+        archive     = ''
+        archive_ok  = $false
         archive_reason = [string]$arch.reason
     }
     return $State
