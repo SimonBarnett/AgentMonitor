@@ -1608,7 +1608,7 @@ function Get-CursorSeedPrompt {
         'Watch seat online. Skills: agent-monitor, watch-seat, agentic-irc + agentic_build (harvest-agent-skills; IRC playbooks to agentic_irc).'
         "IRC home $ResolvedIrcHome. Monitor already started irc_agent+irc_listen on this home (own #{machine} channel only)."
         'Monitor posts !bored for you on start, after DONE, and while idle (own #{machine} only). Do not post busy/idle status yourself.'
-        'ACK/DONE outbox lines: start with ACK or DONE (no nick: prefix); append PRIVMSG only. Skills watch-seat / bob-git-accept have the exact wire.'
+        'ACK/DONE outbox lines: bare keyword-first only (no PRIVMSG wrap, no nick: prefix). Skills watch-seat / bob-git-accept have the exact wire.'
         'You are NOT on IRC by reading irc.log or counting processes — you get IRC only via monitor FROM forwards. Act on those; reply on outbox. No UAT.'
     ) -join ' '
 }
@@ -1644,8 +1644,9 @@ function Get-AgentPrompt {
         'ACK format (exact): ACK <FR|MRB|UAT> <owner/repo>#<n>   Example: ACK FR SimonBarnett/gh-Jeeves#74'
         'DONE format (exact, one line, ends at URL): DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>'
         'Nothing after the URL on a DONE line. Fix notes go on a SEPARATE outbox line. Then STOP - never post !bored (monitor-only).'
-        'Outbox: APPEND only (Add-Content / AppendAllText). Never Set-Content / Out-File without -Append. Prefer: PRIVMSG #{machine} :<payload>'
-        'Wrong: nick-prefixed ACK or text after DONE URL. Right: keyword first, assigned MODE, owner/repo#n, optional PASS|FAIL and URL.'
+        'Outbox: APPEND only (Add-Content / AppendAllText). Never Set-Content / Out-File without -Append.'
+        'CAST IRON (AgentMonitor #133): ACK/DONE are BARE lines only (keyword first). irc_agent say() posts them on #{machine}. Do NOT wrap ACK/DONE as PRIVMSG (no PRIVMSG #chan :ACK, no nick PM).'
+        'Wrong: PRIVMSG-wrapped ACK/DONE, nick-prefixed ACK, or text after DONE URL. Right: ACK MRB owner/repo#n'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
 }
