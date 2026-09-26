@@ -2933,26 +2933,31 @@ function Register-WatchWorkerProcess {
         $self = $PID
         $seatHome = Get-WatchBoundIrcHome
         if (-not $seatHome) { $seatHome = [string]$IrcHome }
-        # Only retire stale workers on THIS slot home — never kill seats 2/3/4.
+        # Retire stale workers on THIS slot only. Use taskkill with a short wait —
+        # Stop-Process can hang forever on zombie PIDs (marchhare 2026-09-26) and
+        # block Register before "watch worker online", leaving IRC with no drain.
         foreach ($row in @(Get-LiveWatchWorkerRows -Kind $script:KindName -SeatHome $seatHome -ExcludePid $self)) {
             $opid = [int]$row.ProcessId
             if ($opid -le 0 -or $opid -eq $self) { continue }
             Write-WatchLog ("closing stale watch worker pid={0} (same home {1})" -f $opid, $seatHome)
-            try { Stop-Process -Id $opid -Force -ErrorAction SilentlyContinue } catch { }
+            try {
+                $tk = Start-Process -FilePath "$env:WINDIR\System32\taskkill.exe" -ArgumentList @('/F', '/PID', "$opid") -WindowStyle Hidden -PassThru
+                if ($tk) { [void]$tk.WaitForExit(2000) }
+            }
+            catch { }
         }
-        Start-Sleep -Milliseconds 400
         if ($script:WorkerPidPath -and (Test-Path -LiteralPath $script:WorkerPidPath)) {
             try {
                 $old = [int](Get-Content -LiteralPath $script:WorkerPidPath -Raw -ErrorAction Stop)
             }
             catch { $old = 0 }
             if ($old -gt 0 -and $old -ne $self) {
-                $oldProc = Get-Process -Id $old -ErrorAction SilentlyContinue
-                if ($oldProc) {
-                    Write-WatchLog "replacing previous watch worker pid=$old (this slot)"
-                    try { Stop-Process -Id $old -Force -ErrorAction SilentlyContinue } catch { }
-                    Start-Sleep -Milliseconds 400
+                Write-WatchLog "replacing previous watch worker pid=$old (this slot)"
+                try {
+                    $tk = Start-Process -FilePath "$env:WINDIR\System32\taskkill.exe" -ArgumentList @('/F', '/PID', "$old") -WindowStyle Hidden -PassThru
+                    if ($tk) { [void]$tk.WaitForExit(2000) }
                 }
+                catch { }
             }
         }
         if ($script:WorkerPidPath) {
