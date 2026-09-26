@@ -1404,24 +1404,43 @@ function Ensure-WatchIrcSeat {
         if ($agentAlive -and $listenAlive) {
             $nick = ''
             if ([string]$agents[0].CommandLine -match '--nick\s+(\S+)') { $nick = $Matches[1] }
-            Write-WatchLog ("irc seat already up nick={0} agent={1} listen={2} home={3}" -f $nick, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
-            if ($nick) {
-                $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
-                if ($nick -match '-(\d+)$') {
-                    $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue ([int]$Matches[1]) -Force
-                }
+            # #136/#137: seat= must be a LIVE pid matching nick suffix when possible.
+            # Writing seat=$PID (monitor) while nick is marchhare-<tui> makes the next
+            # Ensure / liveness disagree — looks like "!bored dropped IRC".
+            $liveSeat = Resolve-WatchSeatPid -CoordPath (Join-Path $resolved 'coordinator.pid') -Default $PID -State $State
+            $nickSuffix = 0
+            if ($nick -match '-(\d+)$') { $nickSuffix = [int]$Matches[1] }
+            if ($nickSuffix -gt 0 -and (Get-Process -Id $nickSuffix -ErrorAction SilentlyContinue)) {
+                $liveSeat = $nickSuffix
             }
-            $coordPath = Join-Path $resolved 'coordinator.pid'
-            @(
-                "nick=$nick"
-                "seat=$PID"
-                "listen=$($listens[0].ProcessId)"
-                "agent=$($agents[0].ProcessId)"
-                "home=$resolved"
-                "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
-            ) | Set-Content -LiteralPath $coordPath -Encoding utf8
-            $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue $false -Force
-            return $State
+            elseif ($nickSuffix -gt 0) {
+                # Agent is up with a dead nick suffix — force relaunch with live seat nick.
+                Write-WatchLog ("irc seat already up but nick {0} suffix dead; relaunch with seat={1}" -f $nick, $liveSeat)
+                foreach ($row in @($agents + $listens)) {
+                    Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+                Start-Sleep -Milliseconds 400
+                $agents = @()
+                $listens = @()
+            }
+            if ($agents.Count -gt 0 -and $listens.Count -gt 0) {
+                Write-WatchLog ("irc seat already up nick={0} seat={1} agent={2} listen={3} home={4}" -f $nick, $liveSeat, $agents[0].ProcessId, $listens[0].ProcessId, $resolved)
+                if ($nick) {
+                    $State | Add-Member -NotePropertyName 'ircNick' -NotePropertyValue $nick -Force
+                    $State | Add-Member -NotePropertyName 'seatNickPid' -NotePropertyValue $liveSeat -Force
+                }
+                $coordPath = Join-Path $resolved 'coordinator.pid'
+                @(
+                    "nick=$nick"
+                    "seat=$liveSeat"
+                    "listen=$($listens[0].ProcessId)"
+                    "agent=$($agents[0].ProcessId)"
+                    "home=$resolved"
+                    "channels=$(Get-WatchSeatChannels -MachineId (Get-WatchMachineId))"
+                ) | Set-Content -LiteralPath $coordPath -Encoding utf8
+                $State | Add-Member -NotePropertyName 'ircEnsureDidConnect' -NotePropertyValue $false -Force
+                return $State
+            }
         }
         Write-WatchLog ("irc ensure stale live rows agentAlive={0} listenAlive={1} - relaunch" -f $agentAlive, $listenAlive)
         foreach ($row in @($agents + $listens)) {
