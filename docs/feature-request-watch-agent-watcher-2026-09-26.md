@@ -35,3 +35,10 @@ python → IRC gone. Meta-watcher saw FAIL and Heal-looped.
 
 **Fix:** On `-Reload`, if a live `agent.exe` still hosts `state.sessionId` (or
 adopt succeeds), clear `seatRootGone` and restore `rootPid`.
+
+## Finding: prune on Reload kills live IRC (!bored correlation)
+`Stop-OrphanWatchPythonForHome` ran at monitor start with `ExcludePid=$PID`, saw
+**no sibling worker**, and killed live `irc_agent`/`irc_listen`. Heal/`!bored`
+activity restarts the monitor → prune → disconnect → Ensure JOIN storm.
+
+**Fix:** If coordinator `seat=` is a live TUI and IRC procs are up, skip prune.
