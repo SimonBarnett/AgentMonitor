@@ -2121,12 +2121,15 @@ function Get-WatchSessionSizeInfo {
     $info.Exists = $true
     $updates = Join-Path $SessionDir 'updates.jsonl'
     $info.UpdatesPath = $updates
-    if (Test-Path -LiteralPath $updates) {
-        $info.UpdatesBytes = [int64](Get-Item -LiteralPath $updates).Length
+    try {
+        if (Test-Path -LiteralPath $updates) {
+            $info.UpdatesBytes = [int64](Get-Item -LiteralPath $updates -ErrorAction Stop).Length
+        }
     }
+    catch { $info.UpdatesBytes = [int64]0 }
     $sum = [int64]0
     foreach ($f in @(Get-ChildItem -LiteralPath $SessionDir -File -Recurse -ErrorAction SilentlyContinue)) {
-        $sum += [int64]$f.Length
+        try { $sum += [int64]$f.Length } catch { }
     }
     $info.FolderBytes = $sum
     return $info
@@ -2157,11 +2160,27 @@ function Archive-WatchSessionDir {
     $leaf = Split-Path -Leaf $SessionDir
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $archRoot = Join-Path $parent ('_archive-{0}-{1}' -f $stamp, ($Reason -replace '[^\w\-]', ''))
-    New-Item -ItemType Directory -Force -Path $archRoot | Out-Null
-    $dest = Join-Path $archRoot $leaf
-    # Move (never delete)
-    Move-Item -LiteralPath $SessionDir -Destination $dest -Force
-    return [pscustomobject]@{ ok = $true; archivePath = $dest; reason = $Reason }
+    try {
+        New-Item -ItemType Directory -Force -Path $archRoot | Out-Null
+        $dest = Join-Path $archRoot $leaf
+        # Move (never delete). Live Grok/Cursor TUI often locks updates.jsonl —
+        # Access denied must not abort IRC forward (marchhare 2026-09-26).
+        Move-Item -LiteralPath $SessionDir -Destination $dest -Force -ErrorAction Stop
+        return [pscustomobject]@{ ok = $true; archivePath = $dest; reason = $Reason }
+    }
+    catch {
+        try {
+            if ((Test-Path -LiteralPath $archRoot) -and -not @(Get-ChildItem -LiteralPath $archRoot -Force -ErrorAction SilentlyContinue)) {
+                Remove-Item -LiteralPath $archRoot -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch { }
+        return [pscustomobject]@{
+            ok          = $false
+            archivePath = ''
+            reason      = ('move-failed: {0}' -f $_.Exception.Message)
+        }
+    }
 }
 
 function New-WatchSessionId {
@@ -2216,6 +2235,9 @@ function Ensure-WatchSessionBeforeResume {
     if (-not (Test-WatchSessionNeedsRotation -SizeInfo $info -MaxUpdatesMb $maxMb)) {
         return $State
     }
+    # Always mint a new session id once oversized is detected so -p resume does
+    # not keep hammering a locked/huge dir. Archive is best-effort: if Move-Item
+    # fails (TUI file lock), keep the old folder and still forward on the new id.
     $arch = Archive-WatchSessionDir -SessionDir $dir -Reason 'oversized'
     $old = $sid
     $State.sessionId = New-WatchSessionId
@@ -2224,13 +2246,21 @@ function Ensure-WatchSessionBeforeResume {
         try { $State.PSObject.Properties.Remove('cursorSessionValid') } catch { }
     }
     $State | Add-Member -NotePropertyName 'lastSessionRotate' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
-    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue 'oversized' -Force
-    Write-WatchLog ("session rotate oversized old={0} new={1} updatesMb={2:N1} archive={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.archivePath)
-    Write-WatchSessionHealthReport -Kind $Kind -Event 'session-rotate-oversized' -Fields @{
+    $rotateReason = if ($arch.ok) { 'oversized' } else { 'oversized-archive-failed' }
+    $State | Add-Member -NotePropertyName 'lastSessionRotateReason' -NotePropertyValue $rotateReason -Force
+    if ($arch.ok) {
+        Write-WatchLog ("session rotate oversized old={0} new={1} updatesMb={2:N1} archive={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.archivePath)
+    }
+    else {
+        Write-WatchLog ("session rotate oversized archive-failed keep-old={0} new={1} updatesMb={2:N1} reason={3}" -f $old, $State.sessionId, ($info.UpdatesBytes / 1MB), $arch.reason)
+    }
+    Write-WatchSessionHealthReport -Kind $Kind -Event $(if ($arch.ok) { 'session-rotate-oversized' } else { 'session-rotate-oversized-archive-failed' }) -Fields @{
         old_session = $old
         new_session = $State.sessionId
         updates_mb  = [Math]::Round(($info.UpdatesBytes / 1MB), 2)
         archive     = $arch.archivePath
+        archive_ok  = [bool]$arch.ok
+        archive_reason = [string]$arch.reason
     }
     return $State
 }
