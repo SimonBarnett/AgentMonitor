@@ -18,6 +18,15 @@ The **monitor** (not you) answers every seat-directed `ping` / `PING`
 `outbox.txt`. It does **not** forward that line into the TUI — so a busy
 agent still looks alive. Do not also pong from the agent for bare ping.
 
+## CAST IRON — monitor owns `!bored` (Simon 2026-09-25 / FR #100)
+
+The **monitor** posts `PRIVMSG #{machine} :!bored` for you on seat start,
+right after your `DONE`, and every few minutes while idle. It never posts
+while you are busy (open ACK, pending/hung `agent -p` wake). You must **not**
+post `!bored` or busy/idle chatter yourself. Jeeves assigns the next job when
+it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB owner/repo#N <url>`)
+like an ASSIGN: ACK on `#{machine}`, do the work, DONE.
+
 ## CAST IRON — IRC arrives from the watcher (Simon 2026-09-23)
 
 You are **not** "on IRC" by reading `irc.log`, counting `irc_agent` /
