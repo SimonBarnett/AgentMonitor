@@ -88,11 +88,7 @@ while ($true) {
     }
     $prev = $st
 
-    if (Test-Path -LiteralPath $waw) {
-        try {
-            $lastHealUtc = $now
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $waw -Once -Heal | Out-Null
-        }
-        catch { }
-    }
+    # CAST IRON (marchhare 2026-09-27): do NOT auto -Heal from this loop.
+    # Stacked Heal/Reload was killing live irc_agent. Emit FAILED only; seat/operator heals.
+    $lastHealUtc = $now
 }
