@@ -2612,9 +2612,28 @@ function Ensure-WatchSessionBeforeResume {
     if (-not (Test-WatchSessionNeedsRotation -SizeInfo $info -MaxUpdatesMb $maxMb)) {
         return $State
     }
+    # FR #146 / ionos: live agent.exe holds updates.jsonl — Move-Item Access Denied.
+    # Never attempt archive while a Grok/Cursor agent has this session open; wake must proceed.
+    $liveHold = $false
+    try {
+        $esc = [regex]::Escape($sid)
+        foreach ($pr in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+            $cl = [string]$pr.CommandLine
+            if (-not $cl) { continue }
+            if ($cl -match $esc -and ($cl -match 'agent\.exe|cursor-agent|\\\.cursor\\')) {
+                $liveHold = $true
+                break
+            }
+        }
+    }
+    catch { }
+    if ($liveHold) {
+        Write-WatchLog ("session rotate skipped live-agent-hold session={0} updatesMb={1:N1}" -f $sid, ($info.UpdatesBytes / 1MB))
+        return $State
+    }
     # Archive is best-effort. If Move-Item fails (live TUI locks updates.jsonl),
     # keep the existing sessionId so -p still wakes the visible seat, and do not
-    # throw (that used to abort the whole IRC forward on marchhare).
+    # throw (that used to abort the whole IRC forward on marchhare / ionos #146).
     $arch = Archive-WatchSessionDir -SessionDir $dir -Reason 'oversized'
     $old = $sid
     if ($arch.ok) {
@@ -2895,8 +2914,14 @@ function Send-IrcLineToSession {
     Add-Content -LiteralPath $inbox -Value $Line -Encoding utf8
     $cwdFull = [IO.Path]::GetFullPath($Cwd)
     $text = Format-WatchWakeText -Line $Line -OurNick (Get-WatchSeatNick -State $State)
-    # FR #99: rotate oversized session before resume (archive, never delete).
-    $State = Ensure-WatchSessionBeforeResume -State $State -WorkDir $cwdFull -Kind $(if ($Grok) { 'grok' } else { 'cursor' })
+    # FR #99 / #146: rotate oversized session before resume (archive, never delete).
+    # Must never abort IRC forward — Access Denied on locked session killed ASSIGN wakes on ionos.
+    try {
+        $State = Ensure-WatchSessionBeforeResume -State $State -WorkDir $cwdFull -Kind $(if ($Grok) { 'grok' } else { 'cursor' })
+    }
+    catch {
+        Write-WatchLog ("session ensure failed (continue forward): $($_.Exception.Message)")
+    }
     $sid = [string]$State.sessionId
     if ($Grok) {
         $exe = Get-GrokAgentPath
