@@ -46,6 +46,8 @@ Do not use talk-seat / bobiverse Watch homes (see playbook).
 
 **`!bored` (FR #100):** the monitor posts `PRIVMSG #{machine} :!bored` on seat start, right after the seat's `DONE`, and every few minutes while idle — never while busy (open ACK or pending `agent -p`). No LLM turn. Jeeves assigns the next job; the seat ACKs.
 
+**Idle supervisor (FR #149):** while a fleet seat stays idle, the monitor PRIVMSG-nudges the **seat nick** at 20 / 40 / 60 minutes (max three; never pings Simon on nudge). After three failed nudges it kills the hung-alive agent tree and starts a fresh instance of the same kind (one restart retry). Two failed restarts → IRC **PM to `simon`**. Digest `working_on` becomes `currently idle` on DONE and a rich one-line description on ACK (worker type, pid, nick, model, task, friendly repo). Dead TUI / root exit remains **FR #126** (monitor teardown — no orphan `!bored`). Loop seats: `-NoIdleSupervisor` (implied by `-SeatType loop`).
+
 **Loop seat (FR #103):** continuous non-job agents (e.g. ce-dayworks) use `-SeatType loop -Channel '#ce-priority-dev1' -Nick dayworks-dev1` (or `-NoBored`). That suppresses every `!bored` and the fleet ACK/DONE brief. Nick must **not** be `{machine}-{pid}` so Jeeves never assigns.
 
 **Forward dedupe (FR #105):** identical IRC `FROM` lines are skipped for `-ForwardDedupeSeconds` (default **60**), then forwarded again. Every skip is logged (`forward skipped (duplicate within …)`).

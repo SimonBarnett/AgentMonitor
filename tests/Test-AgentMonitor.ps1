@@ -10,7 +10,7 @@ $script:Fail = 0
 
 function Invoke-Case {
     param([string]$Id, [scriptblock]$Body)
-    if ($OnlyCase -and $Id -ne $OnlyCase) { return }
+    if ($OnlyCase -and $Id -ne $OnlyCase -and -not $Id.StartsWith($OnlyCase)) { return }
     try {
         & $Body
         $script:Pass++
@@ -295,6 +295,76 @@ Invoke-Case 'AM97 seat N owns bound IRC home (FR#97 two-seat isolation)' {
     if ($w1 -notmatch 'FOR YOU') { throw 'own nick wake must be FOR YOU' }
     if ($w2 -match 'FOR YOU') { throw 'other nick ASSIGN must not FOR YOU this seat' }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Invoke-Case 'AM149a idle supervisor plan nudges at 20/40/60 then restart' {
+    Import-WatchFunctions -Names @('Get-WatchIdleSupervisorAction')
+    $t0 = [datetime]'2026-09-27T12:00:00Z'
+    $a0 = Get-WatchIdleSupervisorAction -IdleSince $t0 -Now ($t0.AddMinutes(19)) -NudgeCount 0 -NudgeEveryMinutes 20 -NudgeMax 3
+    if ($a0.action -ne 'none') { throw "19m should warm, got $($a0.action)" }
+    $a1 = Get-WatchIdleSupervisorAction -IdleSince $t0 -Now ($t0.AddMinutes(20)) -NudgeCount 0 -NudgeEveryMinutes 20 -NudgeMax 3
+    if ($a1.action -ne 'nudge' -or [int]$a1.nudgeIndex -ne 1) { throw "20m nudge1 got $($a1.action)/$($a1.nudgeIndex)" }
+    $a2 = Get-WatchIdleSupervisorAction -IdleSince $t0 -Now ($t0.AddMinutes(40)) -NudgeCount 1 -LastNudgeUtc ($t0.AddMinutes(20)) -NudgeEveryMinutes 20 -NudgeMax 3
+    if ($a2.action -ne 'nudge' -or [int]$a2.nudgeIndex -ne 2) { throw "40m nudge2 got $($a2.action)/$($a2.nudgeIndex)" }
+    $a3 = Get-WatchIdleSupervisorAction -IdleSince $t0 -Now ($t0.AddMinutes(60)) -NudgeCount 2 -LastNudgeUtc ($t0.AddMinutes(40)) -NudgeEveryMinutes 20 -NudgeMax 3
+    if ($a3.action -ne 'nudge' -or [int]$a3.nudgeIndex -ne 3) { throw "60m nudge3 got $($a3.action)/$($a3.nudgeIndex)" }
+    $ar = Get-WatchIdleSupervisorAction -IdleSince $t0 -Now ($t0.AddMinutes(80)) -NudgeCount 3 -LastNudgeUtc ($t0.AddMinutes(60)) -NudgeEveryMinutes 20 -NudgeMax 3
+    if ($ar.action -ne 'restart') { throw "80m after 3 nudges should restart, got $($ar.action)" }
+    $busy = Get-WatchIdleSupervisorAction -IdleSince $t0 -Now ($t0.AddMinutes(99)) -NudgeCount 3 -Busy
+    if ($busy.action -ne 'none' -or $busy.reason -ne 'busy') { throw 'busy must suppress supervisor' }
+}
+
+Invoke-Case 'AM149b board description idle vs rich busy' {
+    Import-WatchFunctions -Names @('New-WatchJobBoardDescription')
+    $idle = New-WatchJobBoardDescription -JobState idle
+    if ($idle -ne 'currently idle') { throw "idle desc=$idle" }
+    $busy = New-WatchJobBoardDescription -WorkerType grok -AgentPid 10908 -IrcNick ionos-14020 -Model grok-4.5 -Task FR -RepoFriendly gh-Jeeves -JobState busy
+    if ($busy -notmatch 'grok' -or $busy -notmatch 'pid=10908' -or $busy -notmatch 'nick=ionos-14020' -or $busy -notmatch 'FR' -or $busy -notmatch 'gh-Jeeves') {
+        throw "busy desc missing fields: $busy"
+    }
+    if ($busy -match 'https://') { throw 'busy desc must use friendly repo name, not URL' }
+}
+
+Invoke-Case 'AM149c parse last ACK for board fields' {
+    Import-WatchFunctions -Names @('Get-WatchOutboxLastAckInfo', 'Get-WatchOutboxRows', 'Get-WatchOutboxPayload')
+    $dir = Join-Path $env:TEMP ('am149-ack-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $ob = Join-Path $dir 'outbox.txt'
+    @(
+        'ACK FR SimonBarnett/old-repo#1'
+        'DONE FR SimonBarnett/old-repo#1 PASS https://example/x'
+        'ACK MRB SimonBarnett/gh-Jeeves#188'
+    ) | Set-Content -LiteralPath $ob -Encoding utf8
+    $info = Get-WatchOutboxLastAckInfo -OutboxPath $ob
+    if (-not $info) { throw 'expected ACK info' }
+    if ($info.task -ne 'MRB' -or $info.repo -ne 'SimonBarnett/gh-Jeeves' -or $info.repo_friendly -ne 'gh-Jeeves' -or [int]$info.number -ne 188) {
+        throw ("bad ack parse: {0}" -f ($info | ConvertTo-Json -Compress))
+    }
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Invoke-Case 'AM149d idle nudge is nick PRIVMSG not Simon/channel' {
+    Import-WatchFunctions -Names @('Send-WatchIrcIdleNudge')
+    function script:Write-WatchLog { param([string]$Message) }
+    $dir = Join-Path $env:TEMP ('am149-nudge-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    if (-not (Send-WatchIrcIdleNudge -IrcHome $dir -Nick 'ionos-14020' -NudgeIndex 1 -NudgeMax 3)) { throw 'nudge send failed' }
+    $raw = Get-Content -LiteralPath (Join-Path $dir 'outbox.txt') -Raw
+    if ($raw -notmatch '^PRIVMSG ionos-14020 :idle nudge 1/3') { throw "bad nudge line: $raw" }
+    if ($raw -match 'PRIVMSG #|PRIVMSG simon') { throw 'nudge must not hit channel or simon' }
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Invoke-Case 'AM149e source contracts FR149 + FR126 coexistence' {
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch 'function Sync-WatchIdleSupervisor') { throw 'Sync-WatchIdleSupervisor missing' }
+    if ($src -notmatch 'function Get-WatchIdleSupervisorAction') { throw 'Get-WatchIdleSupervisorAction missing' }
+    if ($src -notmatch 'currently idle') { throw 'idle board string missing' }
+    if ($src -notmatch 'PRIVMSG simon') { throw 'simon escalate PM missing' }
+    if ($src -notmatch 'IdleNudgeMinutes') { throw 'IdleNudgeMinutes param missing' }
+    # FR #126 path must remain (dead root exits; supervisor is hung-alive only)
+    if ($src -notmatch 'Complete-WatchSeatRootExit') { throw 'FR126 Complete-WatchSeatRootExit must remain' }
+    if ($src -notmatch 'idle-supervisor restart') { throw 'restart log marker missing' }
 }
 
 Write-Host "AM summary: $($script:Pass) pass / $($script:Fail) fail"
