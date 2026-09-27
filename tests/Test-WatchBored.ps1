@@ -158,6 +158,34 @@ Check 'AM100f BoredCheckSeconds <= 5 for DONE latency gate' {
     if ($src -notmatch 'Set-WatchBoredActivity') { throw 'forwards must reset idle via Set-WatchBoredActivity' }
 }
 
+Check 'AM124a start seeds DONE key so stale outbox DONE does not re-fire' {
+    $seatDir = Join-Path ([IO.Path]::GetTempPath()) ('am124a-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $seatDir | Out-Null
+    $out = Join-Path $seatDir 'outbox.txt'
+    try {
+        @(
+            'PRIVMSG #marchhare :DONE FR SimonBarnett/AgentMonitor#99 PASS https://example/pr/9'
+        ) | Set-Content -LiteralPath $out -Encoding UTF8
+        $st = [pscustomobject]@{ ircHome = $seatDir; ircNick = 'marchhare-31712'; sessionId = 'sid-new' }
+        $t0 = [datetime]'2026-09-26T15:00:00'
+        $st = Sync-WatchBored -State $st -Mode start -Now $t0
+        $n1 = @(Get-Content -LiteralPath $out -Encoding UTF8).Count
+        if ($n1 -lt 2) { throw 'start must append !bored' }
+        if (-not $st.boredStartSent) { throw 'boredStartSent not set' }
+        if ([string]$st.boredLastDoneKey -notmatch '(?i)^DONE\b') { throw 'start must seed boredLastDoneKey from stale DONE' }
+        # Four seconds later (the reported bug window): must NOT emit reason=done !bored
+        $st = Sync-WatchBored -State $st -Mode poll -Now $t0.AddSeconds(4)
+        $n2 = @(Get-Content -LiteralPath $out -Encoding UTF8).Count
+        if ($n2 -ne $n1) { throw "stale DONE must not fire reason=done !bored; before=$n1 after=$n2" }
+        # A genuinely new DONE still fires
+        Add-Content -LiteralPath $out -Value 'PRIVMSG #marchhare :DONE FR SimonBarnett/AgentMonitor#124 PASS https://example/pr/124' -Encoding UTF8
+        $st = Sync-WatchBored -State $st -Mode poll -Now $t0.AddSeconds(5)
+        $after = @(Get-Content -LiteralPath $out -Encoding UTF8)
+        if ($after[-1] -ne 'PRIVMSG #marchhare :!bored') { throw "new DONE must emit !bored, got $($after[-1])" }
+    }
+    finally { Remove-Item -LiteralPath $seatDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 if ($fail -gt 0) { Write-Host "Test-WatchBored: $fail failed"; exit 1 }
 Write-Host 'Test-WatchBored: all passed'
 exit 0

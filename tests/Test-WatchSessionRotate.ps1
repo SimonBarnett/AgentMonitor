@@ -123,6 +123,49 @@ Check 'AM99d source documents FR99 rotation' {
     if ($src -notmatch 'Update-WatchPendingForwardHang') { throw 'missing hang detector' }
     if ($src -notmatch 'SessionMaxUpdatesMb') { throw 'missing SessionMaxUpdatesMb param' }
     if ($src -notmatch 'Move-Item') { throw 'archive must Move-Item not delete' }
+    if ($src -notmatch 'oversized-archive-failed|archive-failed') { throw 'must soft-fail locked archive and keep forward' }
+}
+
+Check 'AM99e locked updates.jsonl archive fails soft; keeps session id for forward' {
+    function Write-WatchLog { param([string]$Message) }
+    function Write-WatchSessionHealthReport { param($Kind, $Event, $Fields) }
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('am99e-' + [guid]::NewGuid().ToString('N'))
+    $cwd = Join-Path $root 'work'
+    New-Item -ItemType Directory -Force -Path $cwd | Out-Null
+    $sessions = Join-Path $root 'sessions'
+    $bucket = Join-Path $sessions (Get-GrokCwdSessionBucket -WorkDir $cwd)
+    $sid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+    $sess = Join-Path $bucket $sid
+    New-Item -ItemType Directory -Force -Path $sess | Out-Null
+    $updates = Join-Path $sess 'updates.jsonl'
+    # Hold an exclusive write lock so Move-Item fails (simulates live Grok TUI).
+    $fs = [IO.File]::Open($updates, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $chunk = New-Object byte[] (1MB)
+        for ($i = 0; $i -lt 11; $i++) { $fs.Write($chunk, 0, $chunk.Length) }
+        $fs.Flush()
+        $arch = Archive-WatchSessionDir -SessionDir $sess -Reason 'oversized'
+        if ($arch.ok) { throw 'locked session move must report ok=false' }
+        if ([string]$arch.reason -notmatch 'move-failed') { throw "reason should be move-failed: $($arch.reason)" }
+        if (-not (Test-Path -LiteralPath $sess)) { throw 'locked session dir must remain when archive fails' }
+        $script:GrokSessionsRoot = $sessions
+        $script:SessionMaxUpdatesMb = 10
+        $env:BOB_GROK_SESSIONS_ROOT = $sessions
+        $script:StateDir = Join-Path $root 'state'
+        New-Item -ItemType Directory -Force -Path $script:StateDir | Out-Null
+        $st = [pscustomobject]@{ sessionId = $sid; seenSession = $true }
+        $st2 = Ensure-WatchSessionBeforeResume -State $st -WorkDir $cwd -Kind 'grok'
+        if ($st2.sessionId -ne $sid) { throw 'archive-failed must keep session id so visible TUI still receives -p' }
+        if ($st2.lastSessionRotateReason -ne 'oversized-archive-failed') {
+            throw "lastSessionRotateReason=$($st2.lastSessionRotateReason)"
+        }
+        if (-not (Test-Path -LiteralPath $sess)) { throw 'old locked dir must still exist after soft rotate' }
+    }
+    finally {
+        $fs.Dispose()
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:\BOB_GROK_SESSIONS_ROOT -ErrorAction SilentlyContinue
+    }
 }
 
 if ($fail -gt 0) { Write-Host "Test-WatchSessionRotate: $fail failed"; exit 1 }

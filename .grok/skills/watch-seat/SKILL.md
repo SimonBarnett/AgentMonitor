@@ -26,35 +26,55 @@ The **monitor** (not you) answers every seat-directed `ping` / `PING`
 `outbox.txt`. It does **not** forward that line into the TUI — so a busy
 agent still looks alive. Do not also pong from the agent for bare ping.
 
-## CAST IRON — monitor owns `!bored` (Simon 2026-09-25 / FR #100)
+## CAST IRON — DONE then `!bored` — process MUST KEEP GOING (Simon 2026-09-26)
 
-The **monitor** posts `PRIVMSG #{machine} :!bored` for you on seat start,
-right after your `DONE`, and every few minutes while idle. It never posts
-while you are busy (open ACK, pending/hung `agent -p` wake). You must **not**
-post `!bored` or busy/idle chatter yourself. Jeeves assigns the next job when
-it sees that line; treat a Jeeves assignment (`<nick>: FR|MRB|UAT owner/repo#N <url>`)
-like an ASSIGN: ACK on `#{machine}`, do the work, then exact DONE (below).
+After every finished job the shop loop **continues**. Sequence:
 
-## ACK / DONE wire (FR #104 / bob-git-accept)
+1. Append bare **DONE** (wire below).
+2. Ensure **`!bored`** lands on `#{machine}` so Jeeves assigns the next FR|MRB|UAT.
+3. ACK the next assign; work; DONE; repeat. **Do not park after one job.**
 
-Jeeves only parses lines that **start** with the keyword (after `PRIVMSG #chan :`).
+**Preferred path (deterministic):** `Watch-AgentHealth` detects your DONE and
+posts `PRIVMSG #{machine} :!bored` within ~5s (`Sync-WatchBored` reason=done;
+also on seat start and while idle — FR #100). It never posts while busy
+(open ACK, pending/hung `-p` wake).
+
+**Continuity path:** if the monitor is down, slow, or IRC just recovered, the
+seat appends **in the same turn as DONE**:
+
+```text
+DONE MRB owner/repo#n PASS https://github.com/owner/repo/pull/n
+PRIVMSG #{machine} :!bored
+```
+
+Idle chatter / fake busy lines are still forbidden. Treat a Jeeves assignment
+(`nick: FR|MRB|UAT owner/repo#N <url>`) like an ASSIGN.
+
+## ACK / DONE wire (FR #104 / bob-git-accept / AgentMonitor #133)
+
+Jeeves only parses chat that **starts** with the keyword.
 **No nick prefix.** Free text on a **separate** line.
+
+**CAST IRON:** write **bare** outbox lines. `irc_agent` `say()` posts them on
+`#{machine}`. Do **not** wrap ACK/DONE as `PRIVMSG …` (double-wrap artifacts /
+nick PMs).
 
 ```text
 ACK <FR|MRB|UAT> <owner/repo>#<n>
 DONE <FR|MRB|UAT> <owner/repo>#<n> [PASS|FAIL] <PR-url>
 ```
 
-Examples:
+Examples (exact outbox lines):
 
 ```text
-PRIVMSG #marchhare :ACK FR SimonBarnett/gh-Jeeves#74
-PRIVMSG #marchhare :DONE MRB SimonBarnett/gh-Jeeves#77 FAIL https://github.com/SimonBarnett/gh-Jeeves/pull/80
+ACK FR SimonBarnett/gh-Jeeves#74
+DONE MRB SimonBarnett/gh-Jeeves#77 FAIL https://github.com/SimonBarnett/gh-Jeeves/pull/80
 ```
 
-Wrong: `marchhare-42356: ACK …`, `ACK implement …`, `ACK #75 …`, anything after the
-DONE URL. **Append** to `outbox.txt` only (`Add-Content` / `AppendAllText`) — never
-overwrite (`Set-Content` / `Out-File` without `-Append`). Then **STOP** (monitor `!bored`).
+Wrong: `PRIVMSG #marchhare :ACK …`, `marchhare-42356: ACK …`, `ACK implement …`,
+`ACK #75 …`, anything after the DONE URL. **Append** to `outbox.txt` only
+(`Add-Content` / `AppendAllText`) — never overwrite (`Set-Content` / `Out-File`
+without `-Append`). After DONE, **keep going** (`!bored` — CAST IRON above).
 
 ## Loop seat opt-out (FR #103)
 
@@ -111,5 +131,8 @@ workers never join `#bobiverse` or `#agentic_irc`). You respond on the **target 
 
 ## IRC
 
-Outbox: UTF-8 no BOM. Only lines starting `PRIVMSG ` go raw; anything else is
-`say()` on `#bobiverse`. `JOIN #chan` in outbox is chat, not a JOIN.
+Outbox: UTF-8 no BOM. Lines starting `PRIVMSG ` go raw on the wire. Bare lines
+(`ACK` / `DONE` / notes) use `say()` — for `{machine}-{pid}` seats that is
+**own `#{machine}`** (channel-only worker), not a nick PM. Monitor `!bored` may
+still be pre-wrapped `PRIVMSG #{machine} :!bored`. `JOIN #chan` in outbox is
+chat text, not a JOIN.
