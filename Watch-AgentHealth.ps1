@@ -1579,6 +1579,29 @@ function Ensure-WatchIrcSeat {
     New-Item -ItemType Directory -Force -Path $resolved | Out-Null
     $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
     $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
+    # CAST IRON (marchhare 2026-09-27): CIM under-count must not spawn a second irc_agent.
+    # New agent prior-cleans the live one → Halloy sees disconnect flaps.
+    $coordPath0 = Join-Path $resolved 'coordinator.pid'
+    if ($agents.Count -eq 0 -and (Test-Path -LiteralPath $coordPath0)) {
+        $coordIrc = 0
+        foreach ($line in @(Get-Content -LiteralPath $coordPath0 -ErrorAction SilentlyContinue)) {
+            if ($line -match '^irc_agent=(\d+)\s*$') { $coordIrc = [int]$Matches[1]; break }
+        }
+        if ($coordIrc -gt 0 -and (Get-Process -Id $coordIrc -ErrorAction SilentlyContinue)) {
+            Write-WatchLog ("irc ensure adopt coord irc_agent={0} (CIM miss)" -f $coordIrc)
+            $agents = @([pscustomobject]@{ ProcessId = $coordIrc; CommandLine = ("--nick marchhare-{0} --home {1}" -f (Resolve-WatchSeatPid -CoordPath $coordPath0 -Default $PID -State $State), $resolved) })
+        }
+    }
+    if ($listens.Count -eq 0 -and (Test-Path -LiteralPath $coordPath0)) {
+        $coordLi = 0
+        foreach ($line in @(Get-Content -LiteralPath $coordPath0 -ErrorAction SilentlyContinue)) {
+            if ($line -match '^listen=(\d+)\s*$') { $coordLi = [int]$Matches[1]; break }
+        }
+        if ($coordLi -gt 0 -and (Get-Process -Id $coordLi -ErrorAction SilentlyContinue)) {
+            Write-WatchLog ("irc ensure adopt coord listen={0} (CIM miss)" -f $coordLi)
+            $listens = @([pscustomobject]@{ ProcessId = $coordLi; CommandLine = ("irc_listen.py --home {0}" -f $resolved) })
+        }
+    }
     if ($agents.Count -gt 1 -or $listens.Count -gt 1) {
         Write-WatchLog ("irc ensure collapsing duplicates agent={0} listen={1}" -f $agents.Count, $listens.Count)
         foreach ($row in @($agents + $listens)) {
