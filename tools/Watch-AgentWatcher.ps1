@@ -115,12 +115,31 @@ function Get-LastWatchLogSignals {
     return $hit
 }
 
+function Test-CoordPidAlive {
+    param([string]$IdText)
+    $n = 0
+    if (-not [int]::TryParse($IdText, [ref]$n)) { return $false }
+    if ($n -le 0) { return $false }
+    return $null -ne (Get-Process -Id $n -ErrorAction SilentlyContinue)
+}
+
 function Invoke-WatcherCheck {
     $workers = @(Get-WatchWorkerRows)
     $agents = @(Get-IrcAgentRows -SeatHomePath $IrcHome)
     $listens = @(Get-IrcListenRows -SeatHomePath $IrcHome)
     $coord = Read-Coordinator -SeatHomePath $IrcHome
     $seatAlive = Test-SeatAlive -Seat ([string]$coord.seat)
+    # Fallback when CIM under-counts (marchhare): trust coordinator PIDs via Get-Process.
+    $agentPid = $(if ($agents.Count) { [int]$agents[0].ProcessId } else { 0 })
+    $listenPid = $(if ($listens.Count) { [int]$listens[0].ProcessId } else { 0 })
+    if ($agentPid -le 0 -and (Test-CoordPidAlive -IdText $coord.irc_agent)) {
+        $agentPid = [int]$coord.irc_agent
+        $agents = @([pscustomobject]@{ ProcessId = $agentPid })
+    }
+    if ($listenPid -le 0 -and (Test-CoordPidAlive -IdText $coord.listen)) {
+        $listenPid = [int]$coord.listen
+        $listens = @([pscustomobject]@{ ProcessId = $listenPid })
+    }
     $agentFieldIsHost = ($coord.agent -eq $coord.seat) -and ($coord.seat -ne '')
     $signals = Get-LastWatchLogSignals -LogPath $WatchLog
     $ircLog = Join-Path $IrcHome 'irc.log'
@@ -164,15 +183,34 @@ function Invoke-WatcherCheck {
     if ($signals.err) { Write-WatcherLog ('last-watch-err: {0}' -f $signals.err.Substring(0, [Math]::Min(160, $signals.err.Length))) }
 
     if ($Heal -and $status -eq 'FAIL' -and $WatchScript -and (Test-Path -LiteralPath $WatchScript)) {
-        Write-WatcherLog ('heal: launching Watch-AgentHealth -Reload -IrcHome {0}' -f $IrcHome)
-        $args = @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-            '-File', $WatchScript,
-            '-WatchWorker', '-Grok', '-Windows', 'off', '-Reload',
-            '-IrcHome', $IrcHome
-        )
-        Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -ArgumentList $args -WindowStyle Hidden | Out-Null
+        # Debounce stacked Heal/Reload (kills live irc_agent via orphan prune race).
+        $stamp = Join-Path $env:TEMP 'Watch-AgentWatcher-lastHeal.utc'
+        $now = [datetime]::UtcNow
+        $skip = $false
+        if (Test-Path -LiteralPath $stamp) {
+            $prevHeal = [datetime]::MinValue
+            [void][datetime]::TryParse((Get-Content -LiteralPath $stamp -Raw).Trim(), [ref]$prevHeal)
+            if (($now - $prevHeal).TotalSeconds -lt 120) {
+                Write-WatcherLog ('heal: skipped (cooldown {0}s since last heal)' -f [int]($now - $prevHeal).TotalSeconds)
+                $skip = $true
+            }
+        }
+        if (-not $skip -and $workers.Count -gt 0) {
+            Write-WatcherLog 'heal: skipped (watch worker already live)'
+            $skip = $true
+        }
+        if (-not $skip) {
+            Set-Content -LiteralPath $stamp -Value ($now.ToString('o')) -Encoding ascii
+            Write-WatcherLog ('heal: launching Watch-AgentHealth -Reload -IrcHome {0}' -f $IrcHome)
+            $args = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                '-File', $WatchScript,
+                '-WatchWorker', '-Grok', '-Windows', 'off', '-Reload',
+                '-IrcHome', $IrcHome
+            )
+            Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                -ArgumentList $args -WindowStyle Hidden | Out-Null
+        }
     }
 
     return [pscustomobject]@{
