@@ -1092,9 +1092,9 @@ function Test-ForbiddenIrcHome {
 function Initialize-WatchIrcHome {
     param($State)
     # FR #97: always bound home for this seat
-    $home = Get-WatchBoundIrcHome
-    if (-not $home) { $home = [string]$IrcHome }
-    $resolved = [IO.Path]::GetFullPath($home)
+    $boundHome = Get-WatchBoundIrcHome
+    if (-not $boundHome) { $boundHome = [string]$IrcHome }
+    $resolved = [IO.Path]::GetFullPath($boundHome)
     if (Test-ForbiddenIrcHome -ResolvedHome $resolved) {
         throw "Refusing IrcHome $resolved (talk-seat / Watch home). Use .agentic-irc-watch-*."
     }
@@ -1676,6 +1676,8 @@ function Test-DropIrcLine {
     if ($Line -cmatch ' POINT | DIGEST | AGPK | SEAL ') { return $true }
     # Do NOT drop chat PING here â€” Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
+    # Jeeves idle ack - no agent work; waking -p on this burned the seat behind a stale queue.
+    if ($Line -match '(?i):\s*nothing queued\s*$') { return $true }
     return $false
 }
 
