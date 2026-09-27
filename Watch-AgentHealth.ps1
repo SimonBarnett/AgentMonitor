@@ -1726,12 +1726,11 @@ function Ensure-WatchIrcSeat {
     }
     $listens = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
     if ($listens.Count -eq 0) {
-        $stdoutLog = Join-Path $resolved 'listen.stdout.log'
-        $stderrLog = Join-Path $resolved 'listen.stderr.log'
+        # No stdout/stderr redirect: nested cmd redirection under start /B was exiting
+        # listen immediately on marchhare (agent stayed up; listen flapped).
         Write-WatchLog ("irc ensure start listen home={0}" -f $resolved)
         $listenArgs = ConvertTo-WatchProcessArgumentString -ArgumentList @('-u', $listenPath, '--home', $resolved)
-        Start-WatchDetachedProcess -FilePath $py -ArgumentString $listenArgs `
-            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+        Start-WatchDetachedProcess -FilePath $py -ArgumentString $listenArgs
         Start-Sleep -Milliseconds 400
     }
     $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
