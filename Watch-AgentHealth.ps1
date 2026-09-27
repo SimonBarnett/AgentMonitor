@@ -1689,14 +1689,15 @@ function Ensure-WatchIrcSeat {
     Write-WatchIrcHealthSnapshot -ResolvedHome $resolved -Tag 'pre-start' -SeatPid $seatPid -Nick $nick
     if ($agents.Count -eq 0) {
         Write-WatchLog ("irc ensure start agent nick={0} seat={1} channels={2} home={3}" -f $nick, $seatPid, $channels, $resolved)
-        Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @(
-                '-u', $agentPath,
-                '--host', 'irc.ntsa.uk',
-                '--port', '6697',
-                '--channel', $channels,
-                '--home', $resolved,
-                '--nick', $nick
-            )) -WindowStyle Hidden | Out-Null
+        $agentArgs = ConvertTo-WatchProcessArgumentString -ArgumentList @(
+            '-u', $agentPath,
+            '--host', 'irc.ntsa.uk',
+            '--port', '6697',
+            '--channel', $channels,
+            '--home', $resolved,
+            '--nick', $nick
+        )
+        Start-WatchDetachedProcess -FilePath $py -ArgumentString $agentArgs
         Start-Sleep -Milliseconds 900
         $didConnect = $true
     }
@@ -1705,9 +1706,9 @@ function Ensure-WatchIrcSeat {
         $stdoutLog = Join-Path $resolved 'listen.stdout.log'
         $stderrLog = Join-Path $resolved 'listen.stderr.log'
         Write-WatchLog ("irc ensure start listen home={0}" -f $resolved)
-        Start-Process -FilePath $py -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList @('-u', $listenPath, '--home', $resolved)) `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog | Out-Null
+        $listenArgs = ConvertTo-WatchProcessArgumentString -ArgumentList @('-u', $listenPath, '--home', $resolved)
+        Start-WatchDetachedProcess -FilePath $py -ArgumentString $listenArgs `
+            -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
         Start-Sleep -Milliseconds 400
     }
     $agents = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
@@ -1955,6 +1956,27 @@ function Get-AgentPrompt {
         'Wrong: PRIVMSG-wrapped ACK/DONE, nick-prefixed ACK, or text after DONE URL. Right: ACK MRB owner/repo#n'
         'Do not stamp UAT. Bob/Simon only. No invented secrets. Do not gut cards or docs.'
     ) -join ' '
+}
+
+function Start-WatchDetachedProcess {
+    # CAST IRON (marchhare 2026-09-27): irc_agent/listen started via Start-Process from the
+    # Watch-AgentHealth powershell Job Object die when that worker exits/reloads. Launch via
+    # cmd start /B so they break away and survive worker death (looked like "IRC crashed").
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$ArgumentString,
+        [string]$RedirectStandardOutput = '',
+        [string]$RedirectStandardError = ''
+    )
+    $exe = $FilePath
+    if ($exe -match '[\s"]') { $exe = '"' + ($FilePath -replace '"', '""') + '"' }
+    $cmdLine = "/c start `"watch-detached`" /B $exe $ArgumentString"
+    if ($RedirectStandardOutput -or $RedirectStandardError) {
+        $out = if ($RedirectStandardOutput) { $RedirectStandardOutput } else { 'NUL' }
+        $err = if ($RedirectStandardError) { $RedirectStandardError } else { 'NUL' }
+        $cmdLine = "/c start `"watch-detached`" /B cmd /c `"$exe $ArgumentString >`"$out`" 2>`"$err`"`""
+    }
+    Start-Process -FilePath "$env:ComSpec" -ArgumentList $cmdLine -WindowStyle Hidden | Out-Null
 }
 
 function ConvertTo-WatchProcessArgumentString {
