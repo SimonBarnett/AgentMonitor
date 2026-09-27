@@ -2047,6 +2047,8 @@ function Test-DropIrcLine {
     if ($Line -cmatch ' POINT | DIGEST | AGPK | SEAL ') { return $true }
     # Do NOT drop chat PING here Ã¢â‚¬â€ Send-IrcLineToSession auto-pongs first (CAST IRON).
     if ($Line -match '(?i)is busy\.|password=|XAI_API_KEY') { return $true }
+    # Jeeves idle ack - no agent work; waking -p on this burned the seat behind a stale queue.
+    if ($Line -match '(?i):\s*nothing queued\s*$') { return $true }
     return $false
 }
 

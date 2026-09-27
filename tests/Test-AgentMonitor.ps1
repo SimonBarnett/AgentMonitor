@@ -206,6 +206,17 @@ Invoke-Case 'AM10 drop filter is case-sensitive for protocol tokens (ASSIGN with
     if (-not (Test-DropIrcLine -Line ':server 001 x')) { throw 'non-FROM still drops' }
 }
 
+Invoke-Case 'AM138 drop Jeeves nothing-queued (no -p wake on idle ack)' {
+    Import-WatchFunctions -Names @('Test-DropIrcLine')
+    $idle = 'FROM Jeeves #marchhare marchhare-9460: nothing queued'
+    if (-not (Test-DropIrcLine -Line $idle)) { throw 'addressed nothing queued must drop' }
+    if (-not (Test-DropIrcLine -Line 'FROM Jeeves #marchhare marchhare-1: Nothing Queued')) { throw 'case-insensitive nothing queued must drop' }
+    $real = 'FROM Jeeves #marchhare marchhare-9460: MRB SimonBarnett/AgentMonitor#138 https://github.com/SimonBarnett/AgentMonitor/pull/138'
+    if (Test-DropIrcLine -Line $real) { throw 'real MRB assign must still forward' }
+    $fr = 'FROM Jeeves #marchhare marchhare-9460: FR SimonBarnett/agentic_irc#120 https://github.com/SimonBarnett/agentic_irc/issues/120'
+    if (Test-DropIrcLine -Line $fr) { throw 'real FR assign must still forward' }
+}
+
 Invoke-Case 'AM97 seat N owns bound IRC home (FR#97 two-seat isolation)' {
     # Static + simulated two-seat bind: separate homes/logs; disconnect refuses foreign home;
     # ASSIGN wake only for matching nick; Bind sets $script:IrcHome (not local-only).
