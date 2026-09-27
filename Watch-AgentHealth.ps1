@@ -97,7 +97,17 @@ param(
     [string]$Channel = '',
 
     # FR #103: loop seat nick (e.g. 'dayworks-dev1'). Must NOT match {machine}-{pid} worker grammar.
-    [string]$Nick = ''
+    [string]$Nick = '',
+
+    # FR #149: idle supervisor — PRIVMSG seat nick at 20/40/60 min; restart after 3 failed nudges.
+    [ValidateRange(5, 120)]
+    [int]$IdleNudgeMinutes = 20,
+
+    [ValidateRange(1, 5)]
+    [int]$IdleNudgeMax = 3,
+
+    # FR #149: suppress idle nudges / hung restart (implied by -SeatType loop).
+    [switch]$NoIdleSupervisor
 )
 
 $ErrorActionPreference = 'Stop'
@@ -119,6 +129,9 @@ if (-not $script:SeatType) { $script:SeatType = 'fleet' }
 $script:NoBored = [bool]$NoBored -or ($script:SeatType -eq 'loop')
 $script:WatchChannelOverride = ([string]$Channel).Trim()
 $script:WatchNickOverride = ([string]$Nick).Trim()
+$script:IdleNudgeMinutes = [int]$IdleNudgeMinutes
+$script:IdleNudgeMax = [int]$IdleNudgeMax
+$script:NoIdleSupervisor = [bool]$NoIdleSupervisor -or ($script:SeatType -eq 'loop')
 if ($script:SeatType -eq 'loop') {
     if (-not $script:WatchChannelOverride) {
         throw 'Loop seat (-SeatType loop) requires -Channel (e.g. -Channel ''#ce-priority-dev1'').'
@@ -133,6 +146,11 @@ if ($script:SeatType -eq 'loop') {
 }
 function Test-WatchNoBored {
     return [bool]$script:NoBored
+}
+
+function Test-WatchNoIdleSupervisor {
+    # FR #149: loop seats / -NoIdleSupervisor skip hung-idle nudges and restarts.
+    return [bool]$script:NoIdleSupervisor
 }
 
 function Get-CursorModelCliArgs {
@@ -2432,11 +2450,294 @@ function Sync-WatchBored {
             # fire reason=done a few seconds later (stale completion -> extra !bored).
             if ($doneKey) { $State.boredLastDoneKey = $doneKey }
         }
-        if ($reason -eq 'done') { $State.boredLastDoneKey = $doneKey }
+        if ($reason -eq 'done') {
+            $State.boredLastDoneKey = $doneKey
+            # FR #149: board shows idle after DONE (digest webhook; best-effort).
+            try {
+                $State = Write-WatchJobBoardReport -State $State -Event 'done' -JobState 'idle'
+            }
+            catch { }
+        }
         $State | Add-Member -NotePropertyName 'boredOutboxLen' -NotePropertyValue (
             $(if (Test-Path -LiteralPath $outbox) { [int64](Get-Item -LiteralPath $outbox).Length } else { 0 })
         ) -Force
     }
+    return $State
+}
+
+function Get-WatchOutboxLastAckInfo {
+    # FR #149: parse last ACK FR|MRB|UAT owner/repo#n from outbox.
+    param([string]$OutboxPath)
+    $rows = @(Get-WatchOutboxRows -OutboxPath $OutboxPath)
+    for ($i = $rows.Count - 1; $i -ge 0; $i--) {
+        $payload = Get-WatchOutboxPayload -Line $rows[$i]
+        if ($payload -match '^(?i)ACK\s+(FR|MRB|UAT)\s+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\s*#?\s*(\d+)\b') {
+            return [pscustomobject]@{
+                task          = $Matches[1].ToUpperInvariant()
+                owner         = $Matches[2]
+                name          = $Matches[3]
+                repo          = ('{0}/{1}' -f $Matches[2], $Matches[3])
+                repo_friendly = $Matches[3]
+                number        = [int]$Matches[4]
+            }
+        }
+    }
+    return $null
+}
+
+function New-WatchJobBoardDescription {
+    # FR #149: friendly board line (busy or idle).
+    param(
+        [string]$WorkerType = 'grok',
+        [int]$AgentPid = 0,
+        [string]$IrcNick = '',
+        [string]$Model = '',
+        [string]$Task = '',
+        [string]$RepoFriendly = '',
+        [ValidateSet('busy', 'idle')]
+        [string]$JobState = 'idle'
+    )
+    if ($JobState -eq 'idle') { return 'currently idle' }
+    $parts = @([string]$WorkerType)
+    if ($AgentPid -gt 0) { $parts += ('pid={0}' -f $AgentPid) }
+    if ($IrcNick) { $parts += ('nick={0}' -f $IrcNick) }
+    if ($Model) { $parts += ('model={0}' -f $Model) }
+    if ($Task) { $parts += $Task }
+    if ($RepoFriendly) { $parts += $RepoFriendly }
+    return ($parts -join ' ')
+}
+
+function Get-WatchIdleSupervisorAction {
+    # FR #149 pure planner: nudge at 20/40/60 min idle; restart after 3rd failed nudge window.
+    param(
+        [datetime]$IdleSince,
+        [datetime]$Now = $(Get-Date),
+        [int]$NudgeCount = 0,
+        [datetime]$LastNudgeUtc = [datetime]::MinValue,
+        [int]$NudgeEveryMinutes = 20,
+        [int]$NudgeMax = 3,
+        [switch]$Busy
+    )
+    if ($Busy) {
+        return [pscustomobject]@{ action = 'none'; nudgeIndex = 0; reason = 'busy' }
+    }
+    $every = [Math]::Max(1, [int]$NudgeEveryMinutes)
+    $max = [Math]::Max(1, [int]$NudgeMax)
+    $idleMin = ([Math]::Max(0.0, ($Now - $IdleSince).TotalMinutes))
+    if ($NudgeCount -ge $max) {
+        $sinceNudge = if ($LastNudgeUtc -gt [datetime]::MinValue) { ($Now - $LastNudgeUtc).TotalMinutes } else { $idleMin }
+        if ($sinceNudge -ge $every) {
+            return [pscustomobject]@{ action = 'restart'; nudgeIndex = $NudgeCount; reason = 'third-nudge-failed' }
+        }
+        return [pscustomobject]@{ action = 'none'; nudgeIndex = $NudgeCount; reason = 'await-restart-window' }
+    }
+    $nextAt = ($NudgeCount + 1) * $every
+    if ($idleMin + 0.001 -lt $nextAt) {
+        return [pscustomobject]@{ action = 'none'; nudgeIndex = $NudgeCount; reason = 'warming' }
+    }
+    if ($LastNudgeUtc -gt [datetime]::MinValue -and ($Now - $LastNudgeUtc).TotalMinutes + 0.001 -lt $every) {
+        return [pscustomobject]@{ action = 'none'; nudgeIndex = $NudgeCount; reason = 'nudge-spacing' }
+    }
+    return [pscustomobject]@{ action = 'nudge'; nudgeIndex = ($NudgeCount + 1); reason = 'idle-nudge' }
+}
+
+function Send-WatchIrcIdleNudge {
+    # FR #149: PRIVMSG seat nick (not channel, not Simon). Deterministic; no LLM.
+    param(
+        [string]$IrcHome,
+        [string]$Nick,
+        [int]$NudgeIndex = 1,
+        [int]$NudgeMax = 3
+    )
+    $n = ([string]$Nick).Trim()
+    if (-not $IrcHome -or -not $n) { return $false }
+    if ($n -match '^#') { return $false }
+    New-Item -ItemType Directory -Force -Path $IrcHome | Out-Null
+    $outbox = Join-Path $IrcHome 'outbox.txt'
+    $msg = 'idle nudge {0}/{1}: reply ACK/DONE or any outbox activity, or the monitor will restart this seat after three failed nudges' -f $NudgeIndex, $NudgeMax
+    $line = 'PRIVMSG {0} :{1}' -f $n, $msg
+    $pre = ''
+    if (Test-Path -LiteralPath $outbox) {
+        $bytes = [IO.File]::ReadAllBytes($outbox)
+        if ($bytes.Length -gt 0 -and $bytes[$bytes.Length - 1] -ne 10) { $pre = "`n" }
+    }
+    [IO.File]::AppendAllText($outbox, $pre + $line + "`n", (New-Object System.Text.UTF8Encoding $false))
+    Write-WatchLog ('idle-nudge -> {0} index={1}/{2}' -f $n, $NudgeIndex, $NudgeMax)
+    return $true
+}
+
+function Send-WatchIrcSimonEscalate {
+    # FR #149: after two failed restarts, PM simon (not channel).
+    param(
+        [string]$IrcHome,
+        [string]$Text
+    )
+    if (-not $IrcHome) { return $false }
+    $msg = ([string]$Text).Trim()
+    if (-not $msg) { return $false }
+    New-Item -ItemType Directory -Force -Path $IrcHome | Out-Null
+    $outbox = Join-Path $IrcHome 'outbox.txt'
+    $line = 'PRIVMSG simon :{0}' -f $msg
+    $pre = ''
+    if (Test-Path -LiteralPath $outbox) {
+        $bytes = [IO.File]::ReadAllBytes($outbox)
+        if ($bytes.Length -gt 0 -and $bytes[$bytes.Length - 1] -ne 10) { $pre = "`n" }
+    }
+    [IO.File]::AppendAllText($outbox, $pre + $line + "`n", (New-Object System.Text.UTF8Encoding $false))
+    Write-WatchLog ('escalate PM simon: {0}' -f $msg)
+    return $true
+}
+
+function Write-WatchJobBoardReport {
+    # FR #149: digest working_on rich accept / idle. Best-effort; never throws to caller.
+    param(
+        $State,
+        [ValidateSet('ack', 'done', 'idle', 'nudge', 'restart')]
+        [string]$Event = 'idle',
+        [ValidateSet('busy', 'idle')]
+        [string]$JobState = 'idle'
+    )
+    try {
+        $home = ''
+        if ($State -and $State.ircHome) { $home = [string]$State.ircHome }
+        $outbox = if ($home) { Join-Path $home 'outbox.txt' } else { '' }
+        $ack = Get-WatchOutboxLastAckInfo -OutboxPath $outbox
+        $nick = Get-WatchSeatNick -State $State
+        $pid = 0
+        try { $pid = [int]$State.rootPid } catch { $pid = 0 }
+        $kind = if ($script:KindName) { [string]$script:KindName } elseif ($Grok) { 'grok' } elseif ($Cursor) { 'cursor' } else { 'watch' }
+        $model = ''
+        if ($Cursor -and $script:CursorModel) { $model = [string]$script:CursorModel }
+        elseif ($kind -eq 'grok') { $model = 'grok' }
+        $task = ''; $repo = ''; $friendly = ''; $num = 0
+        if ($ack) {
+            $task = [string]$ack.task
+            $repo = [string]$ack.repo
+            $friendly = [string]$ack.repo_friendly
+            $num = [int]$ack.number
+        }
+        if ($Event -eq 'done' -or $JobState -eq 'idle') { $JobState = 'idle' }
+        elseif ($Event -eq 'ack') { $JobState = 'busy' }
+        $desc = New-WatchJobBoardDescription -WorkerType $kind -AgentPid $pid -IrcNick $nick -Model $model `
+            -Task $task -RepoFriendly $friendly -JobState $JobState
+        $payload = @{
+            op         = 'merge'
+            machine    = $(if ($env:BOB_MACHINE_ID) { $env:BOB_MACHINE_ID.ToLowerInvariant() } else { $env:COMPUTERNAME.ToLowerInvariant() })
+            lastSeen   = (Get-Date).ToUniversalTime().ToString('o')
+            working_on = $desc
+            online     = $true
+            watch_job  = @{
+                worker_type   = $kind
+                pid           = $pid
+                irc_nick      = $nick
+                model         = $model
+                task          = $task
+                repo          = $repo
+                repo_friendly = $friendly
+                issue         = $num
+                state         = $JobState
+                event         = $Event
+            }
+        }
+        $url = $env:BOB_REPORT_URL
+        if (-not $url) { $url = 'http://127.0.0.1:19781/bob/v1/report' }
+        $body = ($payload | ConvertTo-Json -Depth 6 -Compress)
+        $headers = @{ 'Content-Type' = 'application/json' }
+        $sec = $env:BOB_CALLBACK_SECRET
+        if (-not $sec) { $sec = $env:BOB_SECRET }
+        if ($sec) { $headers['X-Bob-Secret'] = $sec }
+        Invoke-WebRequest -Uri $url -Method POST -Body $body -Headers $headers -UseBasicParsing -TimeoutSec 3 | Out-Null
+    }
+    catch { }
+    return $State
+}
+
+function Sync-WatchIdleSupervisor {
+    # FR #149: idle nick nudges + hung restart (root still alive). Loop/NoIdleSupervisor skip.
+    param(
+        $State,
+        [datetime]$Now = $(Get-Date)
+    )
+    if (-not $State) { return $State }
+    if (Test-WatchNoIdleSupervisor) { return $State }
+    if (($State.PSObject.Properties.Name -contains 'seatRootGone') -and [bool]$State.seatRootGone) {
+        return $State
+    }
+    $seatHome = [string]$State.ircHome
+    if (-not $seatHome) { return $State }
+    $outbox = Join-Path $seatHome 'outbox.txt'
+    $busy = Test-WatchSeatBoredBusy -State $State -OutboxPath $outbox -Now $Now
+
+    foreach ($name in @('idleNudgeCount', 'idleNudgeLastUtc', 'idleSupervisorSinceUtc', 'idleRestartAttempts')) {
+        if (-not ($State.PSObject.Properties.Name -contains $name)) {
+            $State | Add-Member -NotePropertyName $name -NotePropertyValue $(if ($name -match 'Count|Attempts') { 0 } else { $null }) -Force
+        }
+    }
+
+    if ($busy) {
+        $State.idleNudgeCount = 0
+        $State.idleNudgeLastUtc = $null
+        $State.idleSupervisorSinceUtc = $null
+        $State.idleRestartAttempts = 0
+        # Rich board on open ACK (accept).
+        if (Test-WatchSeatOpenAck -OutboxPath $outbox -Now $Now) {
+            try { $State = Write-WatchJobBoardReport -State $State -Event 'ack' -JobState 'busy' } catch { }
+        }
+        return $State
+    }
+
+    if (-not $State.idleSupervisorSinceUtc) {
+        if ($State.boredIdleSinceUtc) { $State.idleSupervisorSinceUtc = $State.boredIdleSinceUtc }
+        else { $State.idleSupervisorSinceUtc = $Now }
+    }
+
+    $every = 20
+    if ($script:IdleNudgeMinutes) { $every = [int]$script:IdleNudgeMinutes }
+    $max = 3
+    if ($script:IdleNudgeMax) { $max = [int]$script:IdleNudgeMax }
+    $lastNudge = [datetime]::MinValue
+    if ($State.idleNudgeLastUtc) { $lastNudge = [datetime]$State.idleNudgeLastUtc }
+    $plan = Get-WatchIdleSupervisorAction -IdleSince ([datetime]$State.idleSupervisorSinceUtc) -Now $Now `
+        -NudgeCount ([int]$State.idleNudgeCount) -LastNudgeUtc $lastNudge `
+        -NudgeEveryMinutes $every -NudgeMax $max
+
+    if ($plan.action -eq 'nudge') {
+        $nick = Get-WatchSeatNick -State $State
+        if (Send-WatchIrcIdleNudge -IrcHome $seatHome -Nick $nick -NudgeIndex ([int]$plan.nudgeIndex) -NudgeMax $max) {
+            $State.idleNudgeCount = [int]$plan.nudgeIndex
+            $State.idleNudgeLastUtc = $Now
+            try { $State = Write-WatchJobBoardReport -State $State -Event 'nudge' -JobState 'idle' } catch { }
+        }
+        return $State
+    }
+
+    if ($plan.action -eq 'restart') {
+        $attempts = [int]$State.idleRestartAttempts
+        if ($attempts -ge 2) {
+            [void](Send-WatchIrcSimonEscalate -IrcHome $seatHome -Text (
+                    'AgentMonitor FR#149: seat {0} hung-idle restart failed twice; needs human.' -f (Get-WatchSeatNick -State $State)
+                ))
+            # Stop further restart storms; keep idle board.
+            $State.idleNudgeCount = 0
+            $State.idleSupervisorSinceUtc = $Now
+            return $State
+        }
+        $rp = 0
+        try { $rp = [int]$State.rootPid } catch { $rp = 0 }
+        Write-WatchLog ("idle-supervisor restart attempt={0} rootPid={1}" -f ($attempts + 1), $rp)
+        try { $State = Write-WatchJobBoardReport -State $State -Event 'restart' -JobState 'idle' } catch { }
+        if ($rp -gt 0) {
+            try { Stop-WatchedTree -RootPid $rp } catch { }
+        }
+        $State.rootPid = 0
+        $State.idleRestartAttempts = $attempts + 1
+        $State.idleNudgeCount = 0
+        $State.idleNudgeLastUtc = $null
+        $State.idleSupervisorSinceUtc = $Now
+        $State | Add-Member -NotePropertyName 'idleSupervisorNeedStart' -NotePropertyValue $true -Force
+        return $State
+    }
+
     return $State
 }
 
@@ -3600,6 +3901,13 @@ try {
         $state = Sync-IrcForward -State $state
         $state = Sync-WatchWakeLifecycle -State $state -StartNext
         $state = Sync-WatchBored -State $state -Mode poll
+        # FR #149: idle nick nudges + hung-alive restart (does not replace FR #126 dead-root exit).
+        $state = Sync-WatchIdleSupervisor -State $state
+        if (($state.PSObject.Properties.Name -contains 'idleSupervisorNeedStart') -and [bool]$state.idleSupervisorNeedStart) {
+            $state.idleSupervisorNeedStart = $false
+            $current = $null
+            Write-WatchLog 'idle-supervisor: cleared current so next tick Start-WatchedAgent'
+        }
         Write-WatchState -Obj $state
         Start-Sleep -Seconds $boredCheck
         }
