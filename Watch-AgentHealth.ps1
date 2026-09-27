@@ -1166,26 +1166,34 @@ function Stop-OrphanWatchPythonForHome {
         Write-WatchLog ("orphan python prune skipped - {0} live watch worker(s) own {1}" -f $others.Count, $resolved)
         return 0
     }
-    # CAST IRON (marchhare 2026-09-26): Heal/Reload start used to prune live irc_agent
-    # when no sibling worker was listed yet (ExcludePid=self). That looked like
-    # "!bored disconnects IRC" - bored wakes/heals restart the monitor, prune kills
-    # the connected agent, Ensure JOINs again. If coordinator seat= is a live TUI,
-    # leave IRC alone; Ensure will adopt/reuse.
+    # CAST IRON (marchhare 2026-09-26/27): Heal/Reload start used to prune live irc_agent
+    # when no sibling worker was listed yet (ExcludePid=self). Stacked -Heal/-Reload then
+    # killed the IRC the first Reload just started (CIM race / second prune). If coordinator
+    # seat= is a live TUI, NEVER prune IRC for this home - Ensure will adopt/reuse.
     $coord = Join-Path $resolved 'coordinator.pid'
     $seat = 0
+    $coordIrc = 0
+    $coordListen = 0
     if (Test-Path -LiteralPath $coord) {
         foreach ($line in @(Get-Content -LiteralPath $coord -ErrorAction SilentlyContinue)) {
-            if ($line -match '^seat=(\d+)\s*$') { $seat = [int]$Matches[1]; break }
+            if ($line -match '^seat=(\d+)\s*$') { $seat = [int]$Matches[1] }
+            elseif ($line -match '^irc_agent=(\d+)\s*$') { $coordIrc = [int]$Matches[1] }
+            elseif ($line -match '^listen=(\d+)\s*$') { $coordListen = [int]$Matches[1] }
         }
     }
     if ($seat -gt 0 -and (Get-Process -Id $seat -ErrorAction SilentlyContinue)) {
         $liveAg = @(Get-WatchIrcAgentRows -ResolvedHome $resolved)
         $liveLi = @(Get-WatchIrcListenRows -ResolvedHome $resolved)
-        if ($liveAg.Count -gt 0 -or $liveLi.Count -gt 0) {
-            Write-WatchLog ("orphan python prune skipped - live seat={0} and irc procs still up (agent={1} listen={2})" -f `
-                    $seat, $liveAg.Count, $liveLi.Count)
+        $coordAlive = (($coordIrc -gt 0) -and (Get-Process -Id $coordIrc -ErrorAction SilentlyContinue)) -or `
+            (($coordListen -gt 0) -and (Get-Process -Id $coordListen -ErrorAction SilentlyContinue))
+        if ($liveAg.Count -gt 0 -or $liveLi.Count -gt 0 -or $coordAlive) {
+            Write-WatchLog ("orphan python prune skipped - live seat={0} irc up (cimAgent={1} cimListen={2} coordAlive={3})" -f `
+                    $seat, $liveAg.Count, $liveLi.Count, $coordAlive)
             return 0
         }
+        # Seat TUI live even with no visible IRC yet (Reload race): still do not prune.
+        Write-WatchLog ("orphan python prune skipped - live seat={0} (leave IRC for Ensure adopt)" -f $seat)
+        return 0
     }
     $esc = [regex]::Escape($resolved)
     $stopped = 0
