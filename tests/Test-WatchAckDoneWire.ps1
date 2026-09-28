@@ -48,12 +48,13 @@ Check 'AM104b FOR YOU wake reminds no nick prefix' {
     }
     function Test-WatchIrcAddressedToNick { param([string]$Text, [string]$OurNick) return $true }
     $w = Format-WatchWakeText -Line 'FROM Jeeves #marchhare :marchhare-1: FR x/y#1 https://z' -OurNick 'marchhare-1'
-    if ($w -notmatch 'no marchhare-1: prefix' -and $w -notmatch 'no \{0\}: prefix' -and $w -notmatch 'no nick') {
-        # Format uses -f with OurNick in "no {0}: prefix"
-        if ($w -notmatch 'no .+?: prefix') { throw "wake missing no-prefix reminder: $w" }
+    if ($w -notmatch 'no marchhare-1 nick prefix' -and $w -notmatch 'no nick') {
+        if ($w -notmatch 'no .+ nick prefix') { throw "wake missing no-prefix reminder: $w" }
     }
     if ($w -notmatch 'ACK or DONE') { throw 'wake must mention ACK or DONE' }
     if ($w -notmatch 'append PRIVMSG only' -and $w -notmatch 'append') { throw 'wake must mention append' }
+    if ($w -notmatch 'ASSIGN:') { throw 'wake must mark ASSIGN payload' }
+    if ($w.IndexOf('ASSIGN:') -ge $w.IndexOf('Outbox ACK/DONE:')) { throw 'ASSIGN must precede wire docs' }
 }
 
 Check 'AM104c loop prompt still forbids ACK/DONE' {
