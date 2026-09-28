@@ -3101,19 +3101,37 @@ function Update-WatchPendingForwardHang {
 }
 
 function Format-WatchWakeText {
-    # Wake payload for the headless resume (agent -r <sid> -p <text>).
+    # Wake payload for the headless resume (agent -r <sid> --prompt-file / -p).
     # The session never learns its IRC nick from the seed prompt, so a line addressed to
     # "marchhare-34992:" was read as "for another seat" and ignored (FR skills-visionary#19
     # ASSIGN, 2026-09-25). Addressed lines now carry an explicit FOR YOU marker + our nick.
+    # Issue #152: never glue the FROM/assign after "DONE ends at the URL:" — agents treat that
+    # as a wire-doc example and skip ACK until a human nudges. Put ASSIGN/FROM first.
     param([string]$Line, [string]$OurNick, [int]$MaxLen = 350)
     $text = ([string]$Line).Trim()
     if ($text.Length -gt $MaxLen) { $text = $text.Substring(0, $MaxLen) }
     $parts = Get-IrcFromParts -Line $text
     if ($parts -and $OurNick -and (Test-WatchIrcAddressedToNick -Text $parts.text -OurNick $OurNick)) {
         # FR #104: remind wire on every FOR YOU wake - agents copy nick: from the ear line otherwise.
-        return ('FOR YOU (your IRC nick is {0}; this line is addressed to you - act on it and reply on outbox to {1}). Outbox ACK/DONE: line must start with ACK or DONE (no {0}: prefix); append PRIVMSG only; DONE ends at the URL: {2}' -f $OurNick, $parts.target, $text)
+        # Avoid "{0}:" in the -f string (format-specifier trap). Use "no {0} nick prefix".
+        $nl = [Environment]::NewLine
+        return (
+            ('FOR YOU (your IRC nick is {0}; this line is addressed to you - act on it and reply on outbox to {1}).' -f $OurNick, $parts.target) + $nl +
+            ('ASSIGN: {0}' -f $text) + $nl +
+            ('Outbox ACK/DONE: line must start with ACK or DONE (no {0} nick prefix); append PRIVMSG only; DONE ends at the URL.' -f $OurNick)
+        )
     }
     return $text
+}
+
+function Get-WatchWakeTranscriptPreview {
+    # Operator transcript must show the ASSIGN/FROM body (Issue #152); 120 chars cut at FOR YOU ).
+    param([string]$Text, [int]$MaxLen = 500)
+    $t = [string]$Text
+    if (-not $t) { return '' }
+    if ($MaxLen -le 0) { $MaxLen = 500 }
+    if ($t.Length -le $MaxLen) { return $t }
+    return $t.Substring(0, $MaxLen)
 }
 
 function Test-WatchForwardDedupeHit {
@@ -3226,11 +3244,15 @@ function Send-IrcLineToSession {
     $sid = [string]$State.sessionId
     if ($Grok) {
         $exe = Get-GrokAgentPath
-        $args = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull, '-r', $sid, '-p', $text)
+        # Issue #152: write wake to file (like Cursor) so ASSIGN/FROM is exact and inspectable.
+        $fwdGrok = Join-Path $script:StateDir 'forward-grok.prompt.txt'
+        $utf8Grok = New-Object System.Text.UTF8Encoding $false
+        [IO.File]::WriteAllText($fwdGrok, $text, $utf8Grok)
+        $args = @('--no-auto-update', '--no-alt-screen', '--cwd', $cwdFull, '-r', $sid, '--prompt-file', $fwdGrok)
         $fwdProc = Start-Process -FilePath $exe -ArgumentList (ConvertTo-WatchProcessArgumentString -ArgumentList $args) -WorkingDirectory $cwdFull -WindowStyle Hidden -PassThru
         $State = Set-WatchLastForward -State $State -Line $Line
         $State = Set-WatchBoredActivity -State $State
-        $preview = $text.Substring(0, [Math]::Min(120, $text.Length))
+        $preview = Get-WatchWakeTranscriptPreview -Text $text
         $pidWake = 0
         if ($fwdProc) { $pidWake = [int]$fwdProc.Id }
         $State | Add-Member -NotePropertyName 'wakePid' -NotePropertyValue $pidWake -Force
@@ -3270,7 +3292,7 @@ function Send-IrcLineToSession {
     $fwdProc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launch) -WindowStyle Hidden -PassThru
     $State = Set-WatchLastForward -State $State -Line $Line
     $State = Set-WatchBoredActivity -State $State
-    $preview = $text.Substring(0, [Math]::Min(120, $text.Length))
+    $preview = Get-WatchWakeTranscriptPreview -Text $text
     $pidWake = 0
     if ($fwdProc) { $pidWake = [int]$fwdProc.Id }
     $State | Add-Member -NotePropertyName 'wakePid' -NotePropertyValue $pidWake -Force

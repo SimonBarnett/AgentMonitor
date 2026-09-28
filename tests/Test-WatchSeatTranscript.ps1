@@ -54,6 +54,8 @@ Check 'AM90b source wires PassThru + exit watcher + pane' {
     if ($src -notmatch 'wake end kind=') { throw 'exit watcher must log wake end' }
     if ($src -notmatch '-PassThru') { throw 'Start-Process forward must use -PassThru for PID' }
     if ($src -match '(?i)SendKeys|System\.Windows\.Forms\.SendKeys') { throw 'must not inject keystrokes' }
+    if ($src -notmatch 'Get-WatchWakeTranscriptPreview') { throw 'must preview wake text via Get-WatchWakeTranscriptPreview' }
+    if ($src -notmatch 'forward-grok\.prompt\.txt') { throw 'grok wake must persist forward-grok.prompt.txt' }
 }
 
 Check 'AM90c docs name transcript pane' {

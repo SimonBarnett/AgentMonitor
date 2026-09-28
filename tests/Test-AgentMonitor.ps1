@@ -81,10 +81,30 @@ Invoke-Case 'AM3 addressed FROM wake names the seat nick (FR#19 ASSIGN ignored)'
     $w = Format-WatchWakeText -Line $line -OurNick 'marchhare-34992'
     if ($w -notmatch '^FOR YOU \(your IRC nick is marchhare-34992;') { throw "addressed wake must start FOR YOU + nick: $w" }
     if ($w -notmatch 'reply on outbox to #marchhare') { throw "wake must name the reply channel: $w" }
-    if (-not $w.EndsWith($line)) { throw 'wake must carry the full FROM line' }
+    if ($w -notmatch [regex]::Escape('ASSIGN: ' + $line)) { throw 'wake must carry ASSIGN: + full FROM line' }
     foreach ($t in @('@marchhare-34992, go', 'MARCHHARE-34992 - hi', 'marchhare-34992')) {
         if (-not (Test-WatchIrcAddressedToNick -Text $t -OurNick 'marchhare-34992')) { throw "should be addressed: $t" }
     }
+}
+
+Invoke-Case 'AM3b FOR YOU puts ASSIGN before wire docs (Issue #152)' {
+    Import-WatchFunctions -Names @('Get-IrcFromParts', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText', 'Get-WatchWakeTranscriptPreview')
+    $line = 'FROM Jeeves #marchhare marchhare-14764: MRB SimonBarnett/agentic_build#431 https://github.com/SimonBarnett/agentic_build/pull/431'
+    $w = Format-WatchWakeText -Line $line -OurNick 'marchhare-14764'
+    $assignAt = $w.IndexOf('ASSIGN: ')
+    $wireAt = $w.IndexOf('Outbox ACK/DONE:')
+    if ($assignAt -lt 0) { throw "missing ASSIGN: marker: $w" }
+    if ($wireAt -lt 0) { throw "missing wire reminder: $w" }
+    if ($assignAt -ge $wireAt) { throw 'ASSIGN/FROM must appear before ACK/DONE wire docs' }
+    if ($w -match 'DONE ends at the URL:\s*FROM ') { throw 'must not glue FROM after URL: (legacy bury bug)' }
+    if ($w -notmatch [regex]::Escape($line)) { throw 'full FROM line required in wake' }
+    if ($w -notmatch 'no marchhare-14764 nick prefix') { throw 'wire reminder must name nick without {0}: format trap' }
+    $preview = Get-WatchWakeTranscriptPreview -Text $w
+    if ($preview -notmatch 'ASSIGN:') { throw 'transcript preview must include ASSIGN' }
+    if ($preview -notmatch 'MRB SimonBarnett/agentic_build#431') { throw 'transcript preview must include assign body' }
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch "forward-grok\.prompt\.txt") { throw 'grok forward must write forward-grok.prompt.txt' }
+    if ($src -notmatch "--prompt-file") { throw 'grok forward must use --prompt-file' }
 }
 
 Invoke-Case 'AM4 unaddressed / other-nick FROM wake unchanged' {
