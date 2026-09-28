@@ -81,10 +81,36 @@ Invoke-Case 'AM3 addressed FROM wake names the seat nick (FR#19 ASSIGN ignored)'
     $w = Format-WatchWakeText -Line $line -OurNick 'marchhare-34992'
     if ($w -notmatch '^FOR YOU \(your IRC nick is marchhare-34992;') { throw "addressed wake must start FOR YOU + nick: $w" }
     if ($w -notmatch 'reply on outbox to #marchhare') { throw "wake must name the reply channel: $w" }
-    if (-not $w.EndsWith($line)) { throw 'wake must carry the full FROM line' }
+    if ($w -notmatch [regex]::Escape($line)) { throw 'wake must carry the full FROM line' }
     foreach ($t in @('@marchhare-34992, go', 'MARCHHARE-34992 - hi', 'marchhare-34992')) {
         if (-not (Test-WatchIrcAddressedToNick -Text $t -OurNick 'marchhare-34992')) { throw "should be addressed: $t" }
     }
+}
+
+Invoke-Case 'AM152 ASSIGN before ACK/DONE reminder; no truncate; grok prompt-file' {
+    Import-WatchFunctions -Names @('Get-IrcFromParts', 'Test-WatchIrcAddressedToNick', 'Format-WatchWakeText')
+    $line = 'FROM Jeeves #marchhare marchhare-14764: FR SimonBarnett/gh-Jeeves#211 https://github.com/SimonBarnett/gh-Jeeves/issues/211'
+    $w = Format-WatchWakeText -Line $line -OurNick 'marchhare-14764'
+    $idxAssign = $w.IndexOf('ASSIGN:')
+    $idxWire = $w.IndexOf('Outbox ACK/DONE:')
+    $idxFrom = $w.IndexOf($line)
+    if ($idxAssign -lt 0) { throw 'missing ASSIGN: header' }
+    if ($idxWire -lt 0) { throw 'missing Outbox ACK/DONE reminder' }
+    if ($idxFrom -lt 0) { throw 'full FROM missing' }
+    if (-not ($idxAssign -lt $idxFrom -and $idxFrom -lt $idxWire)) {
+        throw "order must be ASSIGN then FROM then wire reminder; got idxAssign=$idxAssign idxFrom=$idxFrom idxWire=$idxWire"
+    }
+    if ($w -match 'DONE ends at the URL:\s*FROM ') {
+        throw 'FROM must not be glued after DONE ends at the URL: (FR #152)'
+    }
+    # Long FROM must not be truncated for addressed wakes
+    $long = 'FROM Jeeves #ionos ionos-14020: FR SimonBarnett/AgentMonitor#152 https://github.com/SimonBarnett/AgentMonitor/issues/152 ' + ('x' * 400)
+    $wl = Format-WatchWakeText -Line $long -OurNick 'ionos-14020'
+    if ($wl -notmatch [regex]::Escape($long)) { throw 'addressed FROM must not be MaxLen-truncated' }
+    $src = Get-Content -LiteralPath (Join-Path $RepoRoot 'Watch-AgentHealth.ps1') -Raw
+    if ($src -notmatch "--prompt-file") { throw 'Grok wake must use --prompt-file (FR #152)' }
+    if ($src -notmatch 'forward-grok\.prompt\.txt') { throw 'Grok wake prompt file path missing' }
+    if ($src -notmatch 'Min\(500,') { throw 'transcript preview must be >=500 so operators see ASSIGN' }
 }
 
 Invoke-Case 'AM4 unaddressed / other-nick FROM wake unchanged' {
